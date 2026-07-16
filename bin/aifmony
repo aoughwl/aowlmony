@@ -77,7 +77,21 @@ function resolveTools() {
     // OUR lowering pass (aifhexer). When present it replaces nimony's hexer in
     // the pipeline; set AIFMONY_NO_AIFHEXER=1 to fall back to nimony's hexer.
     aifhexer:  pick("AIFMONY_HEXER",     "aifhexer",  firstExisting([path.join(HOME, "aifhexer/bin/aifhexer")])),
+    // OUR .c.aif optimizer (the pass stock hexer/lengc lacks). Applied before
+    // codegen unless AIFMONY_NO_OPT=1.
+    aifopt:    pick("AIFMONY_OPT",       "aifopt",    firstExisting([path.join(HOME, "aifhexer/opt/aifopt.js")])),
   };
+}
+
+// Run aifopt on a .c.aif, returning the optimized file path (or the original if
+// the optimizer is unavailable / disabled / errors — never worse than stock).
+function optimizeCnif(cnif, t, o) {
+  if (!t.aifopt || !fs.existsSync(t.aifopt) || process.env.AIFMONY_NO_OPT) return cnif;
+  const out = cnif.replace(/\.c\.nif$/, ".opt.c.nif");
+  const r = cp.spawnSync("node", [t.aifopt, cnif, "-o", out, "--stats"], { encoding: "utf8" });
+  if (r.status !== 0 || !fs.existsSync(out)) return cnif;
+  if (o.verbose && r.stderr) process.stderr.write("aifmony: " + r.stderr.trim() + "\n");
+  return out;
 }
 
 function fail(msg) { console.error("aifmony: " + msg); process.exit(1); }
@@ -230,19 +244,19 @@ function main() {
     }
     case "exec": {
       if (!o.entry) fail("exec needs --entry NAME");
-      const a = ["exec", b.cnif, "--entry", o.entry];
+      const a = ["exec", optimizeCnif(b.cnif, t, o), "--entry", o.entry];
       for (const v of o.args) a.push("--arg", v);
       const r = runTool("node", [t.nifc, ...a]);
       process.exit(r.status == null ? 0 : r.status);
     }
     case "build": {
-      const a = ["build", b.cnif];
+      const a = ["build", optimizeCnif(b.cnif, t, o)];
       if (o.out) a.push("-o", o.out);
       const r = runTool("node", [t.nifc, ...a]);
       process.exit(r.status == null ? 0 : r.status);
     }
     case "run": {
-      const a = ["run", b.cnif];
+      const a = ["run", optimizeCnif(b.cnif, t, o)];
       const r = runTool("node", [t.nifc, ...a]);
       process.exit(r.status == null ? 0 : r.status);
     }

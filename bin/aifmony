@@ -35,18 +35,30 @@ const cp = require("child_process");
 
 const HOME = os.homedir();
 function firstExisting(cands) { for (const c of cands) if (c && fs.existsSync(c)) return c; return cands[cands.length - 1]; }
-// nifparser's binary may live in bin/ or, when a sibling session is rebuilding,
-// only in a nimcache build dir. Glob both so the driver keeps working.
+// The ecosystem is rebranding nif* → aif* (aowl intermediate format), and a
+// sibling session may be mid-rename/rebuild. Resolve every tool from both
+// prefixes and from nimcache build dirs so the driver keeps working throughout.
+function bothPrefixes(name) { return [name.replace(/^nif/, "aif"), name]; } // aif first
 function nifparserCandidates() {
-  const out = [path.join(HOME, "nifparser/bin/nifparser"),
-              path.join(__dirname, "..", "vendor", "nifparser")];
-  const ncDir = path.join(HOME, "nifparser/nimcache");
-  try {
-    for (const d of fs.readdirSync(ncDir)) {
-      const c = path.join(ncDir, d, "nifparser");
-      if (fs.existsSync(c)) out.push(c);
-    }
-  } catch (_) {}
+  const out = [path.join(__dirname, "..", "vendor", "nifparser")];
+  for (const repo of ["aifparser", "nifparser"]) {
+    for (const bin of ["aifparser", "nifparser"]) out.push(path.join(HOME, repo, "bin", bin));
+    const ncDir = path.join(HOME, repo, "nimcache");
+    try { for (const d of fs.readdirSync(ncDir)) {
+      for (const bin of ["aifparser", "nifparser"]) {
+        const c = path.join(ncDir, d, bin); if (fs.existsSync(c)) out.push(c);
+      }
+    } } catch (_) {}
+  }
+  return out;
+}
+// Candidate paths for a tool that may live under ~/aifX or ~/nifX with binary
+// named aifX or nifX (optionally suffixed, e.g. nifi-interp / aifi-interp).
+function repoBin(base, suffix) {
+  const out = [];
+  for (const repo of bothPrefixes(base))
+    for (const bin of bothPrefixes(base))
+      out.push(path.join(HOME, repo, "bin", bin + (suffix || "")));
   return out;
 }
 
@@ -59,9 +71,12 @@ function resolveTools() {
     nimony:    pick("AIFMONY_NIMONY",    "nimony",    firstExisting([path.join(HOME, "nimony/bin/nimony")])),
     niflerReal:pick("AIFMONY_NIFLER",    "nifler",    firstExisting([path.join(HOME, "nimony/bin/nifler")])),
     nifparser: pick("AIFMONY_NIFPARSER", "nifparser", firstExisting(nifparserCandidates())),
-    nifiInterp:pick("AIFMONY_NIFI",      "nifiInterp",firstExisting([path.join(HOME, "nifi/bin/nifi-interp")])),
-    nifiVm:    pick("AIFMONY_NIFI_VM",   "nifiVm",    firstExisting([path.join(HOME, "nifi/bin/nifi-vm")])),
-    nifc:      pick("AIFMONY_NIFC",      "nifc",      firstExisting([path.join(HOME, "nifc/bin/nifc")])),
+    nifiInterp:pick("AIFMONY_NIFI",      "nifiInterp",firstExisting(repoBin("nifi", "-interp"))),
+    nifiVm:    pick("AIFMONY_NIFI_VM",   "nifiVm",    firstExisting(repoBin("nifi", "-vm"))),
+    nifc:      pick("AIFMONY_NIFC",      "nifc",      firstExisting(repoBin("nifc"))),
+    // OUR lowering pass (aifhexer). When present it replaces nimony's hexer in
+    // the pipeline; set AIFMONY_NO_AIFHEXER=1 to fall back to nimony's hexer.
+    aifhexer:  pick("AIFMONY_HEXER",     "aifhexer",  firstExisting([path.join(HOME, "aifhexer/bin/aifhexer")])),
   };
 }
 
@@ -125,13 +140,25 @@ function compile(nimFile, o, t) {
   fs.mkdirSync(stage, { recursive: true });
   const shim = path.join(stage, "nifler");
   fs.writeFileSync(shim, shimScript(t)); fs.chmodSync(shim, 0o755);
+  // Stage a `hexer` shim → aifhexer so nimony's build (findTool("hexer")) uses
+  // OUR lowering pass. Disable with AIFMONY_NO_AIFHEXER=1.
+  const useAifhexer = t.aifhexer && fs.existsSync(t.aifhexer) && !process.env.AIFMONY_NO_AIFHEXER;
+  const hexerShim = path.join(stage, "hexer");
+  if (useAifhexer) {
+    fs.writeFileSync(hexerShim, "#!/usr/bin/env bash\nexec " + JSON.stringify(t.aifhexer) + " \"$@\"\n");
+    fs.chmodSync(hexerShim, 0o755);
+  } else if (fs.existsSync(hexerShim)) {
+    fs.rmSync(hexerShim);   // ensure a stale shim doesn't linger in the cache
+  }
+  o._usedAifhexer = useAifhexer;
   const nc = path.join(stage, "nc");
 
   const env = Object.assign({}, process.env, {
     NIFRW_USER: abs,
     PATH: stage + path.delimiter + process.env.PATH,
   });
-  log(o, "nifparser parses", path.basename(abs) + "; nimony sem+hexer via", t.nimony);
+  log(o, "nifparser parses", path.basename(abs) + "; sem via nimony;",
+    useAifhexer ? "lowering via aifhexer (ours)" : "lowering via nimony hexer");
   const r = cp.spawnSync(t.nimony, ["c", "--nimcache:" + nc, abs],
     { cwd: stage, env, encoding: "utf8" });
   if (o.verbose && r.stderr) process.stderr.write(r.stderr);

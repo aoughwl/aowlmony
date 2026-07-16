@@ -35,29 +35,32 @@ const cp = require("child_process");
 
 const HOME = os.homedir();
 function firstExisting(cands) { for (const c of cands) if (c && fs.existsSync(c)) return c; return cands[cands.length - 1]; }
-// The ecosystem is rebranding nif* → aif* (aowl intermediate format), and a
-// sibling session may be mid-rename/rebuild. Resolve every tool from both
-// prefixes and from nimcache build dirs so the driver keeps working throughout.
-function bothPrefixes(name) { return [name.replace(/^nif/, "aif"), name]; } // aif first
+// The ecosystem is rebranding nif* → aif* → aowl* (aowl intermediate format),
+// and a sibling session may be mid-rename/rebuild (repo dir and binary can even
+// disagree, e.g. ~/aifparser/bin/aowlparser). Resolve every tool from all three
+// prefixes (newest first) and from nimcache build dirs so the driver keeps
+// working throughout the churn.
+function allPrefixes(name) {
+  return [name.replace(/^nif/, "aowl"), name.replace(/^nif/, "aif"), name]; // aowl → aif → nif
+}
 function nifparserCandidates() {
   const out = [path.join(__dirname, "..", "vendor", "nifparser")];
-  for (const repo of ["aifparser", "nifparser"]) {
-    for (const bin of ["aifparser", "nifparser"]) out.push(path.join(HOME, repo, "bin", bin));
+  const names = allPrefixes("nifparser"); // aowlparser, aifparser, nifparser
+  for (const repo of names) {
+    for (const bin of names) out.push(path.join(HOME, repo, "bin", bin));
     const ncDir = path.join(HOME, repo, "nimcache");
     try { for (const d of fs.readdirSync(ncDir)) {
-      for (const bin of ["aifparser", "nifparser"]) {
-        const c = path.join(ncDir, d, bin); if (fs.existsSync(c)) out.push(c);
-      }
+      for (const bin of names) { const c = path.join(ncDir, d, bin); if (fs.existsSync(c)) out.push(c); }
     } } catch (_) {}
   }
   return out;
 }
-// Candidate paths for a tool that may live under ~/aifX or ~/nifX with binary
-// named aifX or nifX (optionally suffixed, e.g. nifi-interp / aifi-interp).
+// Candidate paths for a tool that may live under ~/aowlX / ~/aifX / ~/nifX with a
+// binary named the same (optionally suffixed, e.g. nifi-interp / aowli-interp).
 function repoBin(base, suffix) {
   const out = [];
-  for (const repo of bothPrefixes(base))
-    for (const bin of bothPrefixes(base))
+  for (const repo of allPrefixes(base))
+    for (const bin of allPrefixes(base))
       out.push(path.join(HOME, repo, "bin", bin + (suffix || "")));
   return out;
 }

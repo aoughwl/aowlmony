@@ -25,11 +25,18 @@ function check(label, got, want) {
 
 // --- native (nifc) exec: call a proc, assert printed result ---------------
 const NATIVE = [
+  ["compute.nim", "fib", [0], "0"],
+  ["compute.nim", "fib", [10], "55"],
   ["compute.nim", "fib", [12], "144"],
   ["compute.nim", "fib", [20], "6765"],
+  ["compute.nim", "ack", [2, 3], "9"],
   ["compute.nim", "ack", [3, 4], "125"],
   ["demo.nim",    "fib", [20], "6765"],
+  ["demo.nim",    "fact", [0], "1"],
+  ["demo.nim",    "fact", [5], "120"],
   ["demo.nim",    "fact", [10], "3628800"],
+  ["demo.nim",    "isPrime", [2], "1"],
+  ["demo.nim",    "isPrime", [91], "0"],
   ["demo.nim",    "isPrime", [97], "1"],
   ["demo.nim",    "isPrime", [100], "0"],
 ];

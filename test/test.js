@@ -1,9 +1,10 @@
 #!/usr/bin/env node
 // End-to-end test for the nimony rewrite driver. Each example is compiled once
-// (nifparser → nimony sem+hexer, cached), then exercised through BOTH aoughwl
-// backends — native (nifc → gcc) and the interpreter (nifi) — and the results
-// are asserted to agree. Proves the self-owned frontend feeds both backends
-// consistently.
+// (nifparser → nimony sem+hexer, cached), then exercised through the aoughwl
+// backends — native (nifc → gcc), the interpreter (nifi), and the idiomatic
+// source backends (aowlts/aowlpy/aowljs) — and the results are asserted to
+// agree with the nimony reference. Proves the self-owned frontend feeds every
+// backend consistently.
 "use strict";
 const cp = require("child_process");
 const path = require("path");
@@ -50,6 +51,35 @@ for (const [file, entry, args, want] of NATIVE) {
 // --- interpreter (nifi): run whole program, assert echoed output ----------
 console.log("interpret (nifparser → sem → nifi):");
 check("interp demo.nim output", aifmony(["interp", path.join(EX, "demo.nim")]).out, "6765\n3628800\ntrue");
+
+// --- idiomatic backends (aowlts/aowljs/aowlpy): emit source + run ----------
+// Each backend's `--run` output must equal the nimony reference for the same
+// program, proving the sem'd .s.nif feeds all three idiomatic backends.
+const os = require("os");
+const fs = require("fs");
+const NIMONY = process.env.AIFMONY_NIMONY || path.join(os.homedir(), "nimony", "bin", "nimony");
+function nimonyRef(file) {
+  const nc = path.join(os.tmpdir(), "aifmony-test-ref", path.basename(file, ".nim"));
+  fs.mkdirSync(nc, { recursive: true });
+  const r = cp.spawnSync(NIMONY, ["c", "-r", "--nimcache:" + nc, path.join(EX, file)], { encoding: "utf8" });
+  return (r.stdout || "").trim();
+}
+console.log("idiomatic backends (aowlts / aowlpy / aowljs), --run == nimony:");
+for (const file of ["hello.nim", "demo.nim"]) {
+  const ref = nimonyRef(file);
+  check(`ts  ${file}`, aifmony(["ts", path.join(EX, file), "--run"]).out, ref);
+  check(`py  ${file}`, aifmony(["py", path.join(EX, file), "--run"]).out, ref);
+  check(`js  ${file}`, aifmony(["js", path.join(EX, file), "--run"]).out, ref);
+}
+// faithful mode: int64 overflow must match native exactly (fast mode does not).
+console.log("faithful mode (int64-exact) on bignum.nim:");
+{
+  const ref = nimonyRef("bignum.nim");
+  check("ts --faithful bignum.nim", aifmony(["ts", path.join(EX, "bignum.nim"), "--faithful", "--run"]).out, ref);
+  check("js --faithful bignum.nim", aifmony(["js", path.join(EX, "bignum.nim"), "--faithful", "--run"]).out, ref);
+  const fast = aifmony(["ts", path.join(EX, "bignum.nim"), "--run"]).out;
+  check("ts fast bignum.nim differs (proves faithful matters)", fast !== ref ? "differs" : "same", "differs");
+}
 
 // --- provenance: the user module is parsed by OUR nifparser ---------------
 console.log("provenance:");

@@ -5,5 +5,8 @@
   "nifparser": "",
   "nifiInterp":"",
   "nifiVm":    "",
-  "nifc":      ""
+  "nifc":      "",
+  "aowlts":    "",
+  "aowljs":    "",
+  "aowlpy":    ""
 }

@@ -20,10 +20,19 @@
 //   aifmony exec   <file.nim> --entry NAME [--arg V…]   native: call one proc, print result
 //   aifmony interp <file.nim>                      interpret via nifi (first-class)
 //   aifmony vm     <file.nim>                      interpret via nifi's bytecode VM
+//   aifmony ts     <file.nim> [--faithful] [--run] idiomatic TypeScript via aowlts
+//   aifmony py     <file.nim> [--run]              idiomatic Python via aowlpy
+//   aifmony js     <file.nim> [--faithful] [--run] idiomatic JavaScript via aowljs
 //   aifmony parse  <file.nim>                      show OUR nifparser .p.nif
 //   aifmony nif    <file.nim>                      compile only; print .s.nif / .c.nif paths
 //
-// Options: -o/--out, --entry, --arg (repeatable), --engine c|nifc, --keep, -v/--verbose
+// Options: -o/--out, --entry, --arg (repeatable), --engine c|nifc, --faithful,
+//   --run, --keep, -v/--verbose
+//
+// The ts/py/js commands produce the sem'd .s.nif (same artifact as interp) and
+// run the matching idiomatic backend (aowlts/aowljs/aowlpy) to emit source next
+// to the .nim (or -o); --run also executes it (node / python3). --faithful
+// (ts/js) selects int64-exact emission.
 //
 // Tool locations resolve from env (AIFMONY_*), then ./aifmony.config.json, then
 // ~/{nimony,nifparser,nifi,nifc} defaults. See `resolveTools()`.
@@ -81,6 +90,13 @@ function resolveTools() {
     // the pipeline; set AIFMONY_NO_AIFHEXER=1 to fall back to nimony's hexer.
     aifhexer:  pick("AIFMONY_HEXER",     "aifhexer",  firstExisting([
                  path.join(HOME, "aowlhexer/bin/aowlhexer"), path.join(HOME, "aifhexer/bin/aifhexer")])),
+    // OUR idiomatic-source backends: each consumes the sem'd .s.nif and emits
+    // idiomatic TypeScript / Python / JavaScript. Repo dir and binary can carry
+    // either the aowl/aif/nif prefix (e.g. ~/aifjs/bin/aowljs) mid-rename, so
+    // resolve across all three prefixes just like the other tools.
+    aowlts:    pick("AIFMONY_AOWLTS",    "aowlts",    firstExisting(repoBin("nifts"))),
+    aowljs:    pick("AIFMONY_AOWLJS",    "aowljs",    firstExisting(repoBin("nifjs"))),
+    aowlpy:    pick("AIFMONY_AOWLPY",    "aowlpy",    firstExisting(repoBin("nifpy"))),
   };
 }
 
@@ -96,6 +112,8 @@ function parseArgs(argv) {
     else if (a === "--entry") o.entry = argv[++i];
     else if (a === "--arg") o.args.push(argv[++i]);
     else if (a === "--engine") o.engine = argv[++i];
+    else if (a === "--faithful") o.faithful = true;
+    else if (a === "--run") o.run = true;
     else if (a === "--keep") o.keep = true;
     else if (a === "-v" || a === "--verbose") o.verbose = true;
     else o._.push(a);
@@ -194,6 +212,31 @@ function runTool(bin, args, opts = {}) {
   return cp.spawnSync(bin, args, Object.assign({ stdio: "inherit" }, opts));
 }
 
+// Idiomatic-source backends (aowlts/aowljs/aowlpy). Each reads the main
+// module's sem'd .s.nif (imported user modules are pulled from the same nc dir
+// by the backend itself) and writes emitted source to stdout; we capture it and
+// write `outFile`. `--faithful` (ts/js only) selects int64-exact emission.
+function emitBackend(bin, snif, outFile, faithful, lang, o, t) {
+  if (!bin || !fs.existsSync(bin)) fail(lang + " backend not found (set AIFMONY_AOWL" +
+    lang.toUpperCase() + " or build ~/aowl" + lang + "/bin/aowl" + lang + ")");
+  const args = [];
+  if (faithful) args.push("--faithful");
+  args.push(snif);
+  log(o, lang, "backend", path.basename(bin), "emits", path.basename(outFile),
+    faithful ? "(faithful)" : "");
+  const r = cp.spawnSync(bin, args, { encoding: "utf8" });
+  if (r.status !== 0) { process.stderr.write(r.stderr || ""); fail(lang + " backend failed"); }
+  fs.writeFileSync(outFile, r.stdout);
+  return outFile;
+}
+
+// Where to put the emitted source: -o if given, else beside the .nim source.
+function outPath(nimFile, o, ext) {
+  if (o.out) return path.resolve(o.out);
+  const abs = path.resolve(nimFile);
+  return path.join(path.dirname(abs), path.basename(abs, path.extname(abs)) + "." + ext);
+}
+
 function main() {
   const argv = process.argv.slice(2);
   const cmd = argv[0];
@@ -202,7 +245,7 @@ function main() {
 
   if (!cmd || cmd === "-h" || cmd === "--help" || cmd === "help") {
     process.stdout.write(fs.readFileSync(__filename, "utf8").split("\n")
-      .slice(1, 40).map((l) => l.replace(/^\/\/ ?/, "")).join("\n") + "\n");
+      .slice(1, 38).map((l) => l.replace(/^\/\/ ?/, "")).join("\n") + "\n");
     return;
   }
 
@@ -249,6 +292,36 @@ function main() {
       const a = ["run", b.cnif];
       const r = runTool("node", [t.nifc, ...a]);
       process.exit(r.status == null ? 0 : r.status);
+    }
+    case "ts": {
+      const out = emitBackend(t.aowlts, b.snif, outPath(file, o, "ts"), o.faithful, "ts", o, t);
+      console.error("aifmony: wrote " + out);
+      if (o.run) {
+        const r = runTool("node", ["--experimental-transform-types", "--no-warnings", out]);
+        process.exit(r.status == null ? 0 : r.status);
+      }
+      break;
+    }
+    case "py": {
+      const out = emitBackend(t.aowlpy, b.snif, outPath(file, o, "py"), false, "py", o, t);
+      console.error("aifmony: wrote " + out);
+      if (o.run) {
+        const r = runTool("python3", [out]);
+        process.exit(r.status == null ? 0 : r.status);
+      }
+      break;
+    }
+    case "js": {
+      const out = emitBackend(t.aowljs, b.snif, outPath(file, o, "js"), o.faithful, "js", o, t);
+      console.error("aifmony: wrote " + out);
+      if (o.run) {
+        // aowljs's flush emits a top-level `return __out;`; wrap the module in an
+        // IIFE and print its return value (same as aowljs's own run harness).
+        const src = fs.readFileSync(out, "utf8");
+        const r = runTool("node", ["-e", "process.stdout.write((function(){" + src + "})())"]);
+        process.exit(r.status == null ? 0 : r.status);
+      }
+      break;
     }
     default:
       fail("unknown command '" + cmd + "'. Try `aifmony help`.");

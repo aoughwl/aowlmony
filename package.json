@@ -1,11 +1,11 @@
 {
-  "name": "aifmony",
+  "name": "aowlmony",
   "version": "0.1.0",
-  "description": "A nimony rewrite driver over the aoughwl self-owned stack: nifparser -> sem+hexer -> {nifc native | nifi interpret | nifjs web}",
-  "keywords": ["nimony", "nif", "compiler", "driver", "nifparser", "nifc", "nifi", "backend"],
-  "bin": { "aifmony": "bin/aifmony" },
+  "description": "The nimony driver over the aoughwl self-owned stack: aowlparser -> sem+hexer -> {aowlc native | aowli interpret | aowljs/ts/py source}. Resolves its toolchain from the aowl registry (~/.aowl); profile-aware.",
+  "keywords": ["nimony", "nif", "aif", "aowl", "compiler", "driver", "aowlparser", "aowlc", "aowli"],
+  "bin": { "aowlmony": "bin/aowlmony", "aifmony": "bin/aifmony" },
   "scripts": { "test": "node test/test.js" },
   "license": "MIT",
-  "repository": { "type": "git", "url": "https://github.com/aoughwl/aifmony.git" },
-  "homepage": "https://aoughwl.github.io/docs/aifmony"
+  "repository": { "type": "git", "url": "https://github.com/aoughwl/aowlmony.git" },
+  "homepage": "https://aoughwl.github.io/docs/aowlmony"
 }

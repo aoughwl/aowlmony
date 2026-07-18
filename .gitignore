@@ -7,3 +7,5 @@ vendor/
 examples/*.ts
 examples/*.js
 examples/*.py
+DESIGN.md
+ROADMAP.md

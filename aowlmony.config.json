@@ -1,5 +1,5 @@
 {
-  "_comment": "Override tool locations here or via AIFMONY_* env vars. Defaults resolve to ~/{nimony,nifparser,nifi,nifc}.",
+  "_comment": "Optional local tool overrides. Precedence: AOWLMONY_* env → this file → aowlup registry → probe. Deprecated aliases (one cycle): AIFMONY_* env, aifmony.config.json. Prefer `aowlup` (profiles) over pinning here.",
   "nimony":    "",
   "nifler":    "",
   "nifparser": "",

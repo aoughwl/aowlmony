@@ -1,41 +1,41 @@
 #!/usr/bin/env node
-// aifmony — the nimony rewrite driver over the aoughwl self-owned stack.
+// aowlmony — the nimony rewrite driver over the aoughwl self-owned stack.
 //
-//   .nim ──► nifparser (ours) ──► nimony sem + hexer (reused) ──► .s.nif / .c.nif
+//   .nim ──► aowlparser (ours) ──► nimony sem + hexer (reused) ──► .s.aif / .c.aif
 //                                                                    │        │
-//                                              nifi (ours, interpret)┘        └─ nifc (ours, native C → gcc)
+//                                              aowli (ours, interpret)┘        └─ aowlc (ours, native C → gcc)
 //
-// The user's own module(s) are parsed by OUR nifparser; the standard library is
-// parsed by the real nifler (it uses `concept`/typed-nil forms nifparser does
-// not emit yet — a known nifparser gap). Semantic analysis and hexer's lowering
+// The user's own module(s) are parsed by OUR aowlparser; the standard library is
+// parsed by the real nifler (it uses `concept`/typed-nil forms aowlparser does
+// not emit yet — a known aowlparser gap). Semantic analysis and hexer's lowering
 // (ARC, closures, exceptions, monomorphisation) are reused from nimony until the
-// self-owned nifsem is finished. Code is then either run natively via nifc or
-// interpreted via nifi — the interpreter is a first-class execution mode, and is
+// self-owned aowlsem is finished. Code is then either run natively via aowlc or
+// interpreted via aowli — the interpreter is a first-class execution mode, and is
 // also the intended compile-time / macro engine (replacing nimony's build-and-
 // exec native macro plugins).
 //
 // Commands:
-//   aifmony run    <file.nim>                      native: whole module → binary → run
-//   aifmony build  <file.nim> [-o BIN]             native: emit a binary at BIN
-//   aifmony exec   <file.nim> --entry NAME [--arg V…]   native: call one proc, print result
-//   aifmony interp <file.nim>                      interpret via nifi (first-class)
-//   aifmony vm     <file.nim>                      interpret via nifi's bytecode VM
-//   aifmony ts     <file.nim> [--faithful] [--run] idiomatic TypeScript via aowlts
-//   aifmony py     <file.nim> [--run]              idiomatic Python via aowlpy
-//   aifmony js     <file.nim> [--faithful] [--run] idiomatic JavaScript via aowljs
-//   aifmony parse  <file.nim>                      show OUR nifparser .p.nif
-//   aifmony nif    <file.nim>                      compile only; print .s.nif / .c.nif paths
+//   aowlmony run    <file.nim>                      native: whole module → binary → run
+//   aowlmony build  <file.nim> [-o BIN]             native: emit a binary at BIN
+//   aowlmony exec   <file.nim> --entry NAME [--arg V…]   native: call one proc, print result
+//   aowlmony interp <file.nim>                      interpret via aowli (first-class)
+//   aowlmony vm     <file.nim>                      interpret via aowli's bytecode VM
+//   aowlmony ts     <file.nim> [--faithful] [--run] idiomatic TypeScript via aowlts
+//   aowlmony py     <file.nim> [--run]              idiomatic Python via aowlpy
+//   aowlmony js     <file.nim> [--faithful] [--run] idiomatic JavaScript via aowljs
+//   aowlmony parse  <file.nim>                      show OUR aowlparser .p.aif
+//   aowlmony nif    <file.nim>                      compile only; print .s.aif / .c.aif paths
 //
-// Options: -o/--out, --entry, --arg (repeatable), --engine c|nifc, --faithful,
+// Options: -o/--out, --entry, --arg (repeatable), --engine c|aowlc, --faithful,
 //   --run, --keep, -v/--verbose
 //
-// The ts/py/js commands produce the sem'd .s.nif (same artifact as interp) and
+// The ts/py/js commands produce the sem'd .s.aif (same artifact as interp) and
 // run the matching idiomatic backend (aowlts/aowljs/aowlpy) to emit source next
 // to the .nim (or -o); --run also executes it (node / python3). --faithful
 // (ts/js) selects int64-exact emission.
 //
-// Tool locations resolve from env (AIFMONY_*), then ./aifmony.config.json, then
-// ~/{nimony,nifparser,nifi,nifc} defaults. See `resolveTools()`.
+// Tool locations resolve from env (AOWLMONY_*), then ./aowlmony.config.json, then
+// ~/{nimony,aowlparser,aowli,aowlc} defaults. See `resolveTools()`.
 "use strict";
 const fs = require("fs");
 const os = require("os");
@@ -75,7 +75,7 @@ function nifparserCandidates() {
   return out;
 }
 // Candidate paths for a tool that may live under ~/aowlX / ~/aifX / ~/nifX with a
-// binary named the same (optionally suffixed, e.g. nifi-interp / aowli-interp).
+// binary named the same (optionally suffixed, e.g. aowli-interp / aowli-interp).
 function repoBin(base, suffix) {
   const out = [];
   for (const repo of allPrefixes(base))
@@ -101,28 +101,31 @@ function loadStack() {
 
 function resolveTools() {
   let cfg = {};
-  const cfgPath = path.join(process.cwd(), "aifmony.config.json");
-  if (fs.existsSync(cfgPath)) { try { cfg = JSON.parse(fs.readFileSync(cfgPath, "utf8")); } catch (_) {} }
+  for (const _n of ["aowlmony.config.json", "aifmony.config.json"]) {  // latter = deprecated alias
+    const _p = path.join(process.cwd(), _n);
+    if (fs.existsSync(_p)) { try { cfg = JSON.parse(fs.readFileSync(_p, "utf8")); break; } catch (_) {} }
+  }
   const st = loadStack(), slots = st.slots || {};
   const reg = (slot) => (slots[slot] && slots[slot].exe) || "";
-  // precedence: AIFMONY_* env → aifmony.config.json → aowl registry → probe.
-  const pick = (env, key, def) => process.env[env] || cfg[key] || def;
+  // precedence: AOWLMONY_* env → aowlmony.config.json (or deprecated aifmony.config.json) → aowlup registry → probe.
+  const pick = (env, key, def) =>
+    process.env[env] || process.env[env.replace(/^AOWLMONY_/, "AIFMONY_")] || cfg[key] || def;
   const t = {
-    nimony:    pick("AIFMONY_NIMONY",    "nimony",    firstExisting([path.join(HOME, "nimony/bin/nimony")])),
-    niflerReal:pick("AIFMONY_NIFLER",    "nifler",    firstExisting([path.join(HOME, "nimony/bin/nifler")])),
-    nifparser: pick("AIFMONY_NIFPARSER", "nifparser", firstExisting(nifparserCandidates())),
-    nifiInterp:pick("AIFMONY_NIFI",      "nifiInterp",reg("interp") || firstExisting(repoBin("nifi", "-interp"))),
-    nifiVm:    pick("AIFMONY_NIFI_VM",   "nifiVm",    reg("vm")     || firstExisting(repoBin("nifi", "-vm"))),
-    nifc:      pick("AIFMONY_NIFC",      "nifc",      reg("native") || firstExisting(repoBin("nifc"))),
+    nimony:    pick("AOWLMONY_NIMONY",    "nimony",    firstExisting([path.join(HOME, "nimony/bin/nimony")])),
+    niflerReal:pick("AOWLMONY_NIFLER",    "nifler",    firstExisting([path.join(HOME, "nimony/bin/nifler")])),
+    nifparser: pick("AOWLMONY_NIFPARSER", "nifparser", firstExisting(nifparserCandidates())),
+    nifiInterp:pick("AOWLMONY_NIFI",      "nifiInterp",reg("interp") || firstExisting(repoBin("nifi", "-interp"))),
+    nifiVm:    pick("AOWLMONY_NIFI_VM",   "nifiVm",    reg("vm")     || firstExisting(repoBin("nifi", "-vm"))),
+    nifc:      pick("AOWLMONY_NIFC",      "nifc",      reg("native") || firstExisting(repoBin("nifc"))),
     // OUR lowering pass (aowlhexer). Used only when the active profile selects the
-    // aowlhexer variant (see below); AIFMONY_NO_AIFHEXER=1 forces nimony's hexer.
-    aifhexer:  pick("AIFMONY_HEXER",     "aifhexer",  firstExisting([
+    // aowlhexer variant (see below); AOWLMONY_NO_AOWLHEXER=1 forces nimony's hexer.
+    aifhexer:  pick("AOWLMONY_HEXER",     "aifhexer",  firstExisting([
                  path.join(HOME, "aowlhexer/bin/aowlhexer"), path.join(HOME, "aifhexer/bin/aifhexer")])),
     // OUR idiomatic-source backends (aowlts/aowljs/aowlpy); registry-resolved,
     // else probed across the aowl/aif/nif prefix family.
-    aowlts:    pick("AIFMONY_AOWLTS",    "aowlts",    reg("ts") || firstExisting(repoBin("nifts"))),
-    aowljs:    pick("AIFMONY_AOWLJS",    "aowljs",    reg("js") || firstExisting(repoBin("nifjs"))),
-    aowlpy:    pick("AIFMONY_AOWLPY",    "aowlpy",    reg("py") || firstExisting(repoBin("nifpy"))),
+    aowlts:    pick("AOWLMONY_AOWLTS",    "aowlts",    reg("ts") || firstExisting(repoBin("nifts"))),
+    aowljs:    pick("AOWLMONY_AOWLJS",    "aowljs",    reg("js") || firstExisting(repoBin("nifjs"))),
+    aowlpy:    pick("AOWLMONY_AOWLPY",    "aowlpy",    reg("py") || firstExisting(repoBin("nifpy"))),
   };
   // Which stack variant is active for each swappable pass. compile() uses these to
   // decide whether to inject OUR parser/hexer or defer to nimony's nifler/hexer.
@@ -130,8 +133,8 @@ function resolveTools() {
   t.parserVariant = (slots.parser || {}).variant || "aowlparser";
   t.hexerVariant  = (slots.hexer  || {}).variant || "aowlhexer";
   t.semVariant    = (slots.sem    || {}).variant || "nimsem";
-  if (t.parserVariant === "aowlparser" && reg("parser")) t.nifparser = process.env.AIFMONY_NIFPARSER || cfg.nifparser || reg("parser");
-  if (t.hexerVariant === "aowlhexer" && reg("hexer"))    t.aifhexer  = process.env.AIFMONY_HEXER     || cfg.aifhexer  || reg("hexer");
+  if (t.parserVariant === "aowlparser" && reg("parser")) t.nifparser = process.env.AOWLMONY_NIFPARSER || process.env.AOWLMONY_NIFPARSER || cfg.nifparser || reg("parser");
+  if (t.hexerVariant === "aowlhexer" && reg("hexer"))    t.aifhexer  = process.env.AOWLMONY_HEXER || process.env.AOWLMONY_HEXER || cfg.aifhexer  || reg("hexer");
   return t;
 }
 
@@ -156,7 +159,7 @@ function parseArgs(argv) {
   return o;
 }
 
-// The nifler-compatible shim: OUR nifparser for the user module(s) in
+// The nifler-compatible shim: OUR aowlparser for the user module(s) in
 // $NIFRW_USER; the real nifler for the stdlib and the --deps import sidecar.
 function shimScript(t) {
   return `#!/usr/bin/env bash
@@ -185,7 +188,7 @@ fi
 `;
 }
 
-// Run nifparser → nimony (sem+hexer) and return { dir, mainHash, snif, cnif, pnif }.
+// Run aowlparser → nimony (sem+hexer) and return { dir, mainHash, snif, cnif, pnif }.
 // The staging dir is persistent and keyed by the source path so `nimony c`'s
 // incremental cache is reused across invocations (only the first run is cold).
 function compile(nimFile, o, t) {
@@ -197,10 +200,10 @@ function compile(nimFile, o, t) {
   const key = require("crypto").createHash("sha1")
     .update([abs, t.parserVariant, t.hexerVariant, t.semVariant].join("\0"))
     .digest("hex").slice(0, 12);
-  const stage = o.out && o.keep ? path.join(path.dirname(abs), ".aifmony")
-    : path.join(os.tmpdir(), "aifmony-cache", key);
+  const stage = o.out && o.keep ? path.join(path.dirname(abs), ".aowlmony")
+    : path.join(os.tmpdir(), "aowlmony-cache", key);
   fs.mkdirSync(stage, { recursive: true });
-  // parser: inject OUR nifparser (via the nifler shim) only when the active
+  // parser: inject OUR aowlparser (via the nifler shim) only when the active
   // profile selects the aowlparser variant; otherwise let nimony's own nifler
   // parse everything (the `nimony` profile / `aowl use parser nifler`).
   const useOurParser = (t.parserVariant || "aowlparser") === "aowlparser";
@@ -209,9 +212,9 @@ function compile(nimFile, o, t) {
   else if (fs.existsSync(shim)) fs.rmSync(shim);
   // Stage a `hexer` shim → aowlhexer so nimony's build (findTool("hexer")) uses
   // OUR lowering pass — only when the profile selects the aowlhexer variant.
-  // AIFMONY_NO_AIFHEXER=1 forces nimony's hexer regardless.
+  // AOWLMONY_NO_AOWLHEXER=1 forces nimony's hexer regardless.
   const wantAifhexer = (t.hexerVariant || "aowlhexer") === "aowlhexer";
-  const useAifhexer = wantAifhexer && t.aifhexer && fs.existsSync(t.aifhexer) && !process.env.AIFMONY_NO_AIFHEXER;
+  const useAifhexer = wantAifhexer && t.aifhexer && fs.existsSync(t.aifhexer) && !(process.env.AOWLMONY_NO_AOWLHEXER || process.env.AOWLMONY_NO_AOWLHEXER);
   const hexerShim = path.join(stage, "hexer");
   if (useAifhexer) {
     fs.writeFileSync(hexerShim, "#!/usr/bin/env bash\nexec " + JSON.stringify(t.aifhexer) + " \"$@\"\n");
@@ -232,7 +235,7 @@ function compile(nimFile, o, t) {
     { cwd: stage, env, encoding: "utf8" });
   if (o.verbose && r.stderr) process.stderr.write(r.stderr);
 
-  // main module: the nc subdir that holds <hash>.c.nif matching its own name
+  // main module: the nc subdir that holds <hash>.c.aif matching its own name
   let mainHash = null, cnif = null;
   if (fs.existsSync(nc)) {
     for (const d of fs.readdirSync(nc)) {
@@ -249,7 +252,7 @@ function compile(nimFile, o, t) {
   }
   const snif = path.join(nc, mainHash + ".s.nif");
   const pnif = path.join(nc, mainHash + ".p.nif");
-  // provenance check: the user module must have been parsed by OUR nifparser
+  // provenance check: the user module must have been parsed by OUR aowlparser
   let byOurParser = false;
   try { byOurParser = /vendor "(?:nif|aif|aowl)parser"/.test(fs.readFileSync(pnif, "utf8")); } catch (_) {}
   return { stage, nc, mainHash, snif, cnif, pnif, byOurParser };
@@ -260,11 +263,11 @@ function runTool(bin, args, opts = {}) {
 }
 
 // Idiomatic-source backends (aowlts/aowljs/aowlpy). Each reads the main
-// module's sem'd .s.nif (imported user modules are pulled from the same nc dir
+// module's sem'd .s.aif (imported user modules are pulled from the same nc dir
 // by the backend itself) and writes emitted source to stdout; we capture it and
 // write `outFile`. `--faithful` (ts/js only) selects int64-exact emission.
 function emitBackend(bin, snif, outFile, faithful, lang, o, t) {
-  if (!bin || !fs.existsSync(bin)) fail(lang + " backend not found (set AIFMONY_AOWL" +
+  if (!bin || !fs.existsSync(bin)) fail(lang + " backend not found (set AOWLMONY_AOWL" +
     lang.toUpperCase() + " or build ~/aowl" + lang + "/bin/aowl" + lang + ")");
   const args = [];
   if (faithful) args.push("--faithful");
@@ -399,7 +402,7 @@ function main() {
       break;
     }
     default:
-      fail("unknown command '" + cmd + "'. Try `aifmony help`.");
+      fail("unknown command '" + cmd + "'. Try `aowlmony help`.");
   }
 }
 

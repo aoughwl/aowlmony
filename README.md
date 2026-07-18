@@ -68,7 +68,7 @@ aowlmony nif    prog.nim -v                     # .p/.s/.c.aif paths + which par
 registry (`aowlup config`), honoring the active profile. Precedence:
 
 ```
-AIFMONY_* env  →  aifmony.config.json  →  aowlup registry  →  dev-fallback probe
+AOWLMONY_* env  →  aowlmony.config.json  →  aowlup registry  →  dev-fallback probe
 ```
 
 The per-source build cache is keyed on the active variants, so switching profile

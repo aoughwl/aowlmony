@@ -133,8 +133,8 @@ function resolveTools() {
   t.parserVariant = (slots.parser || {}).variant || "aowlparser";
   t.hexerVariant  = (slots.hexer  || {}).variant || "aowlhexer";
   t.semVariant    = (slots.sem    || {}).variant || "nimsem";
-  if (t.parserVariant === "aowlparser" && reg("parser")) t.nifparser = process.env.AOWLMONY_NIFPARSER || process.env.AOWLMONY_NIFPARSER || cfg.nifparser || reg("parser");
-  if (t.hexerVariant === "aowlhexer" && reg("hexer"))    t.aifhexer  = process.env.AOWLMONY_HEXER || process.env.AOWLMONY_HEXER || cfg.aifhexer  || reg("hexer");
+  if (t.parserVariant === "aowlparser" && reg("parser")) t.nifparser = process.env.AOWLMONY_NIFPARSER || process.env.AIFMONY_NIFPARSER || cfg.nifparser || reg("parser");
+  if (t.hexerVariant === "aowlhexer" && reg("hexer"))    t.aifhexer  = process.env.AOWLMONY_HEXER || process.env.AIFMONY_HEXER || cfg.aifhexer  || reg("hexer");
   return t;
 }
 
@@ -165,13 +165,14 @@ function shimScript(t) {
   return `#!/usr/bin/env bash
 REAL_NIFLER=${JSON.stringify(t.niflerReal)}
 NIFPARSER=${JSON.stringify(t.nifparser)}
-wants_deps=0; pos=(); infile=""
+wants_deps=0; pos=(); infile=""; outfile=""
 for a in "$@"; do
   case "$a" in
     --deps) wants_deps=1 ;;
     --portablePaths|-f|--forceRebuild|--deps*) ;;
     p|parse) pos+=("p") ;;
     *.nim) pos+=("$a"); infile="$a" ;;
+    *.nif|*.aif) pos+=("$a"); outfile="$a" ;;
     *) pos+=("$a") ;;
   esac
 done
@@ -180,8 +181,11 @@ is_user=0
 IFS=':' read -ra USERS <<< "\${NIFRW_USER:-}"
 for u in "\${USERS[@]}"; do [ -n "$u" ] && [ "$(readlink -f "$u" 2>/dev/null)" = "$real_in" ] && is_user=1; done
 if [ "$is_user" = 1 ]; then
+  # real nifler writes the --deps import sidecar (aowlparser emits none)
   [ "$wants_deps" = 1 ] && "$REAL_NIFLER" "$@" >/dev/null 2>&1
-  exec "$NIFPARSER" "\${pos[@]}"
+  # aowlparser's [out] positional is a no-op (writes nothing), so emit to stdout
+  # and redirect to the output path; that also overwrites nifler's sidecar .p.nif.
+  if [ -n "$outfile" ]; then exec "$NIFPARSER" p "$infile" - > "$outfile"; else exec "$NIFPARSER" "\${pos[@]}"; fi
 else
   exec "$REAL_NIFLER" "$@"
 fi

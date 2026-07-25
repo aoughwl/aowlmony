@@ -53,6 +53,81 @@ const C = { bold: sgr(1, 22), dim: sgr(2, 22), teal: rgb(45, 212, 191), violet: 
   green: rgb(52, 211, 153), amber: rgb(251, 191, 36), red: rgb(248, 113, 113), cyan: rgb(103, 232, 249), gray: rgb(120, 130, 145) };
 const G = { diamond: "◆", ok: "✓", cross: "✗", arrow: "→", bar: "│", gear: "⚙", dot: "●" };
 
+// ---- raw ANSI codes (same palette as C.*), gated on the same COLOR check -----
+// Used by the single-line Nim highlighter below, which needs raw open/close
+// codes rather than the wrap-a-string C.* helpers. All empty when color is off.
+const ANSI = COLOR ? {
+  reset: "\x1b[0m",
+  red: "\x1b[38;2;248;113;113m",     // keywords
+  yellow: "\x1b[38;2;251;191;36m",   // types
+  cyan: "\x1b[38;2;103;232;249m",    // strings / chars
+  green: "\x1b[38;2;52;211;153m",    // comments
+} : { reset: "", red: "", yellow: "", cyan: "", green: "" };
+
+// JS port of the user's Nim highlighter scheme (github.com/thing-king/colors,
+// highlighter.nim): a char-by-char scan that splits tokens on whitespace and the
+// operators ( ) [ ] { } , . ; : + - * / = < > ! , matches accumulated words
+// against keyword/type lists, and colors double-quoted strings, single-quoted
+// chars (escape-aware, tolerant of an unterminated literal on an error line) and
+// `#` line comments. Returns the line unchanged when color is off. Dependency-free.
+const HL_KEYWORDS = new Set(("addr and as asm bind block break case cast concept const continue converter " +
+  "defer discard distinct div do elif else end enum except export finally for from func if import in include " +
+  "interface is isnot iterator let macro method mixin mod nil not notin object of or out proc ptr raise ref " +
+  "return shl shr static template try tuple type using var when while xor yield").split(" "));
+const HL_TYPES = new Set(("int float string bool char byte uint int8 int16 int32 int64 uint8 uint16 uint32 " +
+  "uint64 float32 float64 seq array void").split(" "));
+const HL_DELIM = new Set([..."()[]{},.;:+-*/=<>! \t"]);
+function hlNim(line) {
+  if (!COLOR) return line;
+  let out = "", word = "";
+  const flush = () => {
+    if (!word) return;
+    if (HL_KEYWORDS.has(word)) out += ANSI.red + word + ANSI.reset;
+    else if (HL_TYPES.has(word)) out += ANSI.yellow + word + ANSI.reset;
+    else out += word;
+    word = "";
+  };
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i];
+    if (ch === '"' || ch === "'") {           // string / char literal → cyan
+      flush();
+      const q = ch; let s = ch; i++;
+      while (i < line.length) {
+        const c = line[i]; s += c;
+        if (c === "\\" && i + 1 < line.length) { s += line[i + 1]; i += 2; continue; }
+        i++;
+        if (c === q) break;                    // closing quote (unterminated: loop just ends)
+      }
+      i--;                                     // outer loop re-increments
+      out += ANSI.cyan + s + ANSI.reset;
+    } else if (ch === "#") {                    // comment → green, to end of line
+      flush();
+      out += ANSI.green + line.slice(i) + ANSI.reset;
+      break;
+    } else if (HL_DELIM.has(ch)) {              // delimiter/operator: token boundary
+      flush();
+      out += ch;
+    } else {
+      word += ch;
+    }
+  }
+  flush();
+  return out;
+}
+
+// ---- timing ------------------------------------------------------------------
+function fmtDur(ms) { return ms < 1000 ? Math.round(ms) + "ms" : (ms / 1000).toFixed(1) + "s"; }
+// A concise dim one-liner after a successful run-ish action, e.g.
+//   ✓ interp · compiled 312ms · ran 41ms
+function timingLine(label, compileMs, runMs, o) {
+  if (o && o.time === false) return;
+  const seg = [];
+  if (compileMs != null) seg.push("compiled " + fmtDur(compileMs));
+  if (runMs != null) seg.push("ran " + fmtDur(runMs));
+  if (!seg.length) return;
+  console.error("  " + C.green(G.ok) + " " + C.dim(label + " · " + seg.join(" · ")));
+}
+
 function firstExisting(cands) { for (const c of cands) if (c && fs.existsSync(c)) return c; return cands[cands.length - 1]; }
 // The ecosystem is rebranding nif* → aif* → aowl* (aowl intermediate format),
 // and a sibling session may be mid-rename/rebuild (repo dir and binary can even
@@ -157,19 +232,30 @@ function resolveTools() {
 function fail(msg) { console.error("  " + C.red(G.cross) + " " + C.red(msg)); process.exit(1); }
 function log(o, ...a) { if (o.verbose) console.error("  " + C.dim(G.dot) + " " + C.gray(a.join(" "))); }
 
+// aowli flags forwarded verbatim to the interpreter/VM (interp/vm/eval); the
+// tracing family and the hybrid-native family. `--` and everything after it is
+// the interpreted program's own argv (aowli's `-- ARG…`).
+const AOWLI_PASS = (a) =>
+  /^--trace(-full|-profile)?$/.test(a) || /^--trace-depth:/.test(a) ||
+  a === "--hybrid" || a === "--build-native" ||
+  /^--interpret:/.test(a) || /^--native-src:/.test(a) || /^--native-lib:/.test(a);
 function parseArgs(argv) {
-  const o = { args: [], _: [] };
+  const o = { args: [], _: [], aowli: [], progArgs: [] };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
-    if (a === "--") { o._.push(...argv.slice(i + 1)); break; }
+    if (a === "--") { o.progArgs = argv.slice(i + 1); break; }
     else if (a === "-o" || a === "--out") o.out = argv[++i];
     else if (a === "--entry") o.entry = argv[++i];
+    else if (a === "-e") o.eval = argv[++i];
     else if (a === "--arg") o.args.push(argv[++i]);
     else if (a === "--engine") o.engine = argv[++i];
     else if (a === "--faithful") o.faithful = true;
     else if (a === "--run") o.run = true;
     else if (a === "--keep") o.keep = true;
+    else if (a === "--time") o.time = true;
+    else if (a === "--no-time") o.time = false;
     else if (a === "-v" || a === "--verbose") o.verbose = true;
+    else if (AOWLI_PASS(a)) o.aowli.push(a);
     else o._.push(a);
   }
   return o;
@@ -275,6 +361,80 @@ exec "$NIMSEM" x "$out"
 // We show the real diagnostics (the staged `../../…` path rewritten back to the
 // file the user named), drop the driver noise (unless -v), then — if aowlsuggest
 // recognizes the mistake — print its guidance + the one command that fixes it.
+// Parse cleaned compiler output into structured diagnostics. Two frontends:
+//   nimony:      path(line, col) Error: message        (Warning:/Hint: too)
+//   aowlparser:  file:line:col: error[code]: message   (+ trailing help:/hint:)
+function parseDiagnostics(lines) {
+  const diags = [];
+  const reNimony = /^\s*(.+?)\((\d+),\s*(\d+)\)\s+(Error|Warning|Hint):\s*(.*)$/;
+  const reAowl = /^\s*(.+?):(\d+):(\d+):\s*(error|warning|hint)(?:\[([^\]]+)\])?:\s*(.*)$/;
+  const reHelp = /^\s*(help|hint):\s*(.*)$/;
+  for (const raw of lines) {
+    let m;
+    if ((m = reNimony.exec(raw)))
+      diags.push({ file: m[1], line: +m[2], col: +m[3], severity: m[4].toLowerCase(), code: null, message: m[5], helps: [] });
+    else if ((m = reAowl.exec(raw)))
+      diags.push({ file: m[1], line: +m[2], col: +m[3], severity: m[4].toLowerCase(), code: m[5] || null, message: m[6], helps: [] });
+    else if (diags.length && (m = reHelp.exec(raw)))
+      diags[diags.length - 1].helps.push({ kind: m[1].toLowerCase(), text: m[2] });
+  }
+  return diags;
+}
+
+// Resolve a diagnostic's display path back to a readable source file and return
+// its lines, or null if it can't be read (renderer then falls back to one-line).
+function readSourceLines(d, abs, nimFile) {
+  let p = null;
+  if (d.file === nimFile || path.basename(d.file) === path.basename(abs)) p = abs;
+  else { const cand = path.resolve(path.dirname(abs), d.file); if (fs.existsSync(cand)) p = cand; else if (fs.existsSync(d.file)) p = d.file; }
+  if (!p) return null;
+  try { return fs.readFileSync(p, "utf8").split(/\r?\n/); } catch (_) { return null; }
+}
+
+// Caret width: endCol if the frontend gave one, else the identifier/word starting
+// at col, min 1.
+function caretSpan(d, line) {
+  if (d.endCol && d.endCol >= d.col) return d.endCol - d.col + 1;
+  let n = 0;
+  for (let i = d.col - 1; i >= 0 && i < line.length && /[A-Za-z0-9_]/.test(line[i]); i++) n++;
+  return Math.max(1, n);
+}
+
+// Render one diagnostic as a framed, syntax-highlighted source snippet (rustc
+// style): severity-colored header, a dim line-number gutter, one line of context
+// above/below when present, a caret underline in the severity color, and any
+// help:/hint: notes under a `=` marker. Falls back to a one-liner when the source
+// line can't be read.
+function renderDiag(d, abs, nimFile) {
+  const sevColor = d.severity === "warning" ? C.amber : d.severity === "hint" ? C.cyan : C.red;
+  const header = C.bold(sevColor(d.severity)) + (d.code ? C.gray("[" + d.code + "]") : "") + ": " + d.message;
+  const srcLines = readSourceLines(d, abs, nimFile);
+  const target = d.line - 1;
+  if (!srcLines || typeof srcLines[target] !== "string") {
+    console.error("  " + sevColor(d.file + ":" + d.line + ":" + d.col + ":") + " " + header);
+    for (const h of d.helps) console.error("  " + C.gray("= " + h.kind + ": " + h.text));
+    return;
+  }
+  const lo = Math.max(0, target - 1), hi = Math.min(srcLines.length - 1, target + 1);
+  const gw = String(hi + 1).length;
+  const pad = (n) => String(n).padStart(gw);
+  const rail = " ".repeat(gw) + " " + C.gray(G.bar);
+  console.error(header);
+  console.error(" ".repeat(gw) + " " + C.gray("┌─ ") + C.gray(d.file + ":" + d.line + ":" + d.col));
+  console.error(rail);
+  for (let i = lo; i <= hi; i++) {
+    if (i === target) {
+      console.error(C.dim(pad(i + 1)) + " " + C.gray(G.bar) + " " + hlNim(srcLines[i]));
+      const span = caretSpan(d, srcLines[i]);
+      console.error(rail + " " + " ".repeat(Math.max(0, d.col - 1)) +
+        sevColor("^".repeat(span)) + " " + sevColor(d.message));
+    } else {
+      console.error(C.dim(pad(i + 1) + " " + G.bar + " " + srcLines[i]));
+    }
+  }
+  for (const h of d.helps) console.error(" ".repeat(gw) + " " + C.gray("= " + h.kind + ": " + h.text));
+}
+
 function reportCompileFailure(r, nimFile, abs, stage, o, t) {
   const src = path.resolve(abs);
   let staged = null;
@@ -284,13 +444,26 @@ function reportCompileFailure(r, nimFile, abs, stage, o, t) {
     /^\s*FAILURE:\s/.test(s) || /\bnifmake\b/.test(s) || /\.build\.nif\b/.test(s) ||
     /\.deps\.nif\b/.test(s) || (stage && s.includes(stage)) || /^\s*[✗×]\s/.test(s);
   const lines = ((r.stdout || "") + "\n" + (r.stderr || ""))
-    .split(/\r?\n/).map((s) => s.replace(/\s+$/, "")).filter((s) => s.trim() && !isNoise(s));
-  const errs = lines.filter((s) => /\bError:/.test(s));
-  const show = errs.length ? errs : lines;
-  if (show.length) { for (const s of show) console.error("  " + C.red(clean(s))); }
-  else { const raw = ((r.stdout || "") + (r.stderr || "")).trim(); if (raw) console.error(clean(raw)); }
+    .split(/\r?\n/).map((s) => s.replace(/\s+$/, "")).filter((s) => s.trim() && !isNoise(s)).map(clean);
+  const diags = parseDiagnostics(lines);
+  const shownKeys = new Set();
+  if (diags.length) {
+    let first = true;
+    for (const d of diags) {
+      if (!first) console.error("");
+      first = false;
+      renderDiag(d, abs, nimFile);
+      shownKeys.add((d.code || "") + "@" + d.line);
+    }
+  } else {
+    // no parseable diagnostic — preserve the old one-line behavior
+    const errs = lines.filter((s) => /\bError:/.test(s));
+    const show = errs.length ? errs : lines;
+    if (show.length) { for (const s of show) console.error("  " + C.red(s)); }
+    else { const raw = ((r.stdout || "") + (r.stderr || "")).trim(); if (raw) console.error(clean(raw)); }
+  }
   if (o.verbose && r.stderr) { console.error(C.gray("  [verbose] raw driver output:")); process.stderr.write(r.stderr); }
-  suggestFixHints(nimFile, abs, t);
+  suggestFixHints(nimFile, abs, t, shownKeys);
 }
 
 // Ask aowlsuggest whether it recognizes (and can fix) anything in the file — many
@@ -298,7 +471,8 @@ function reportCompileFailure(r, nimFile, abs, stage, o, t) {
 // elif, <T>→[T], unterminated string, mismatched bracket…). Print its guidance +
 // the exact command to apply the fix. Best-effort: silent if the tool is absent
 // or has nothing to say, and never blocks the primary error.
-function suggestFixHints(nimFile, abs, t) {
+function suggestFixHints(nimFile, abs, t, shownKeys) {
+  shownKeys = shownKeys || new Set();
   const bin = t && t.aowlsuggest;
   if (!bin || !fs.existsSync(bin)) return;
   let parsed;
@@ -312,17 +486,26 @@ function suggestFixHints(nimFile, abs, t) {
   if (Array.isArray(parsed)) diags = parsed;
   else if (parsed && Array.isArray(parsed.files)) for (const f of parsed.files) diags.push(...(f.diagnostics || []));
   if (diags.length === 0) return;
-  let anyFix = false;
-  console.error("");
-  console.error("  " + C.cyan("aowlsuggest") + C.gray(" recognizes this — likely a cross-language habit:"));
-  for (const d of diags.slice(0, 6)) {
-    const at = d.line ? ":" + d.line + (d.col ? ":" + d.col : "") : "";
-    const tip = d.fix ? C.gray("  → " + d.fix) : "";
-    console.error("    " + C.amber("•") + " " + C.gray(nimFile + at) + "  " + (d.message || d.code || "") + tip);
-    if (d.fix || d.autofixable) anyFix = true;
+  // Dedupe: a finding already shown as the primary diagnostic (same code + line)
+  // isn't repeated — but if it's auto-fixable we still surface the apply command.
+  let anyFixable = false;
+  const fresh = [];
+  for (const d of diags) {
+    if (d.fix || d.autofixable) anyFixable = true;
+    if (shownKeys.has((d.code || "") + "@" + d.line)) continue;
+    fresh.push(d);
   }
-  if (diags.length > 6) console.error("    " + C.gray("… " + (diags.length - 6) + " more (aowlsuggest lint " + nimFile + ")"));
-  if (anyFix) console.error("  " + C.gray("apply the auto-fixes: ") + C.cyan("aowlmony fix " + nimFile));
+  if (fresh.length) {
+    console.error("");
+    console.error("  " + C.cyan("aowlsuggest") + C.gray(" recognizes this — likely a cross-language habit:"));
+    for (const d of fresh.slice(0, 6)) {
+      const at = d.line ? ":" + d.line + (d.col ? ":" + d.col : "") : "";
+      const tip = d.fix ? C.gray("  → " + d.fix) : "";
+      console.error("    " + C.amber("•") + " " + C.gray(nimFile + at) + "  " + (d.message || d.code || "") + tip);
+    }
+    if (fresh.length > 6) console.error("    " + C.gray("… " + (fresh.length - 6) + " more (aowlsuggest lint " + nimFile + ")"));
+  }
+  if (anyFixable) console.error("  " + C.gray("apply the auto-fixes: ") + C.cyan("aowlmony fix " + nimFile));
 }
 
 function compile(nimFile, o, t) {
@@ -401,8 +584,10 @@ function compile(nimFile, o, t) {
   log(o, "nifparser parses", path.basename(abs) + ";",
     useAowlsem ? "sem via aowlsem (ours)" : "sem via nimony nimsem;",
     useAifhexer ? "lowering via aowlhexer (ours)" : "lowering via nimony hexer");
+  const _t0 = process.hrtime.bigint();
   const r = cp.spawnSync(t.nimony, ["c", "--nimcache:" + nc, abs],
     { cwd: stage, env, encoding: "utf8" });
+  const compileMs = Number(process.hrtime.bigint() - _t0) / 1e6;
   if (o.verbose && r.stderr) process.stderr.write(r.stderr);
 
   // main module: the nc subdir that holds <hash>.c.aif matching its own name
@@ -432,11 +617,28 @@ function compile(nimFile, o, t) {
   // provenance check: the user module must have been parsed by OUR aowlparser
   let byOurParser = false;
   try { byOurParser = /vendor "(?:nif|aif|aowl)parser"/.test(fs.readFileSync(pnif, "utf8")); } catch (_) {}
-  return { stage, nc, mainHash, snif, cnif, pnif, byOurParser };
+  return { stage, nc, mainHash, snif, cnif, pnif, byOurParser, compileMs };
 }
 
 function runTool(bin, args, opts = {}) {
   return cp.spawnSync(bin, args, Object.assign({ stdio: "inherit" }, opts));
+}
+
+// Build the aowli argv for interp/vm/eval: forwarded aowli flags, then the .s.nif,
+// then the program's own args after `--`. `vmOnly` keeps just the VM-supported
+// trace flags. Under --hybrid --build-native with no --native-src, auto-supply the
+// entry source (we know it) — logged at -v.
+function aowliArgs(snif, absSrc, o, vmOnly) {
+  let pass = o.aowli.slice();
+  if (vmOnly) pass = pass.filter((a) => a === "--trace" || a === "--trace-full");
+  else if (pass.includes("--hybrid") && pass.includes("--build-native") &&
+           !pass.some((a) => a.startsWith("--native-src:"))) {
+    pass.push("--native-src:" + absSrc);
+    log(o, "hybrid: auto --native-src:" + absSrc + " (entry source)");
+  }
+  const args = [...pass, snif];
+  if (o.progArgs && o.progArgs.length) args.push("--", ...o.progArgs);
+  return args;
 }
 
 // Idiomatic-source backends (aowlts/aowljs/aowlpy). Each reads the main
@@ -481,6 +683,7 @@ function main() {
       ["build FILE [-o BIN]", "native: emit a binary"],
       ["exec FILE --entry N", "native: call one proc, print result"],
       ["interp FILE", "interpret via aowli (tree-walk)"],
+      ["eval FILE | -e CODE", "run via aowli; -e runs inline code, - reads stdin"],
       ["vm FILE", "interpret via aowli bytecode VM"],
       ["ts|js FILE [--faithful]", "emit idiomatic TypeScript / JavaScript"],
       ["py FILE", "emit idiomatic Python"],
@@ -495,7 +698,10 @@ function main() {
       C.dim("  parser=") + C.cyan(t.parserVariant) + C.dim(" hexer=") + C.cyan(t.hexerVariant) +
       C.dim(" sem=") + C.cyan(t.semVariant) + C.dim("   one-shot: ") + C.teal("aowlmony +nimony run <file>"));
     console.log("  " + C.gray("options ") + G.arrow + " " +
-      C.dim("-o  --entry  --arg  --engine  --faithful  --run  --keep  -v"));
+      C.dim("-o  --entry  --arg  --engine  --faithful  --run  --keep  --no-time  -v"));
+    console.log("  " + C.gray("aowli   ") + G.arrow + " " +
+      C.dim("interp/vm/eval forward --trace[-full|-profile] --trace-depth:N, the hybrid ") +
+      C.dim("family (--hybrid --build-native --interpret: --native-src: --native-lib:), and ") + C.teal("-- ARG…") + C.dim(" to the program"));
     console.log("  " + C.gray("toolchain ") + G.arrow + " " + C.teal("aowlup") +
       C.dim("   — aowlup manages the stack (profiles/versions/setup), aowlmony compiles (rustup : cargo)"));
     console.log("");
@@ -528,11 +734,28 @@ function main() {
     process.exit(r.status == null ? 0 : r.status);
   }
 
-  const file = o._[0];
+  // eval: the friendliest "just run it" — a FILE (like interp), inline `-e CODE`,
+  // or `-` for stdin. Inline/stdin snippets go to a temp .nim (run as-is; nothing
+  // auto-injected) that's cleaned up on exit. Errors flow through the rich renderer.
+  let file = o._[0];
+  if (cmd === "eval") {
+    let code = null;
+    if (o.eval != null) code = o.eval;
+    else if (o._[0] === "-") { try { code = fs.readFileSync(0, "utf8"); } catch (_) { code = ""; } }
+    if (code != null) {
+      const tmp = path.join(os.tmpdir(), "aowlmony-eval-" + process.pid + ".nim");
+      fs.writeFileSync(tmp, code.endsWith("\n") ? code : code + "\n");
+      process.on("exit", () => { try { fs.unlinkSync(tmp); } catch (_) {} });
+      file = tmp;
+    } else if (!file) fail("eval needs a FILE, -e CODE, or -");
+  }
   if (!file) fail(cmd + " needs a .nim file");
+  const absSrc = path.resolve(file);
   const b = compile(file, o, t);
   if (o.verbose) log(o, "main module", b.mainHash, "parsed by",
     b.byOurParser ? "nifparser (ours)" : "nifler (fallback)");
+  // Time the run/backend step separately from compile() (already timed).
+  const timeRun = (fn) => { const s = process.hrtime.bigint(); const r = fn(); return { r, ms: Number(process.hrtime.bigint() - s) / 1e6 }; };
 
   switch (cmd) {
     case "nif":
@@ -540,48 +763,64 @@ function main() {
       console.log(".s.nif  " + b.snif);
       console.log(".c.nif  " + b.cnif);
       break;
-    case "interp": {
-      const r = runTool(t.nifiInterp, [b.snif]);
-      process.exit(r.status == null ? 0 : r.status);
+    case "interp":
+    case "eval": {
+      const { r, ms } = timeRun(() => runTool(t.nifiInterp, aowliArgs(b.snif, absSrc, o, false)));
+      const st = r.status == null ? 0 : r.status;
+      if (st === 0) timingLine(cmd, b.compileMs, ms, o);
+      process.exit(st);
     }
     case "vm": {
-      const r = runTool(t.nifiVm, [b.snif]);
-      process.exit(r.status == null ? 0 : r.status);
+      const { r, ms } = timeRun(() => runTool(t.nifiVm, aowliArgs(b.snif, absSrc, o, true)));
+      const st = r.status == null ? 0 : r.status;
+      if (st === 0) timingLine(cmd, b.compileMs, ms, o);
+      process.exit(st);
     }
     case "exec": {
       if (!o.entry) fail("exec needs --entry NAME");
       const a = ["exec", b.cnif, "--entry", o.entry];
       for (const v of o.args) a.push("--arg", v);
-      const r = runTool("node", [t.nifc, ...a]);
-      process.exit(r.status == null ? 0 : r.status);
+      const { r, ms } = timeRun(() => runTool("node", [t.nifc, ...a]));
+      const st = r.status == null ? 0 : r.status;
+      if (st === 0) timingLine(cmd, b.compileMs, ms, o);
+      process.exit(st);
     }
     case "build": {
       const a = ["build", b.cnif];
       if (o.out) a.push("-o", o.out);
-      const r = runTool("node", [t.nifc, ...a]);
-      process.exit(r.status == null ? 0 : r.status);
+      const { r, ms } = timeRun(() => runTool("node", [t.nifc, ...a]));
+      const st = r.status == null ? 0 : r.status;
+      if (st === 0) timingLine(cmd, b.compileMs, ms, o);
+      process.exit(st);
     }
     case "run": {
-      const a = ["run", b.cnif];
-      const r = runTool("node", [t.nifc, ...a]);
-      process.exit(r.status == null ? 0 : r.status);
+      const { r, ms } = timeRun(() => runTool("node", [t.nifc, "run", b.cnif]));
+      const st = r.status == null ? 0 : r.status;
+      if (st === 0) timingLine(cmd, b.compileMs, ms, o);
+      process.exit(st);
     }
     case "ts": {
       const out = emitBackend(t.aowlts, b.snif, outPath(file, o, "ts"), o.faithful, "ts", o, t);
       console.error("  " + C.green(G.ok) + " " + C.gray("wrote ") + C.cyan(out.replace(HOME, "~")));
       if (o.run) {
-        const r = runTool("node", ["--experimental-transform-types", "--no-warnings", out]);
-        process.exit(r.status == null ? 0 : r.status);
+        const { r, ms } = timeRun(() => runTool("node", ["--experimental-transform-types", "--no-warnings", out]));
+        const st = r.status == null ? 0 : r.status;
+        if (st === 0) timingLine(cmd, b.compileMs, ms, o);
+        process.exit(st);
       }
+      timingLine(cmd, b.compileMs, null, o);
       break;
     }
     case "py": {
       const out = emitBackend(t.aowlpy, b.snif, outPath(file, o, "py"), false, "py", o, t);
       console.error("  " + C.green(G.ok) + " " + C.gray("wrote ") + C.cyan(out.replace(HOME, "~")));
       if (o.run) {
-        const r = runTool("python3", [out]);
-        process.exit(r.status == null ? 0 : r.status);
+        const { r, ms } = timeRun(() => runTool("python3", [out]));
+        const st = r.status == null ? 0 : r.status;
+        if (st === 0) timingLine(cmd, b.compileMs, ms, o);
+        process.exit(st);
       }
+      timingLine(cmd, b.compileMs, null, o);
       break;
     }
     case "js": {
@@ -591,9 +830,12 @@ function main() {
         // aowljs's flush emits a top-level `return __out;`; wrap the module in an
         // IIFE and print its return value (same as aowljs's own run harness).
         const src = fs.readFileSync(out, "utf8");
-        const r = runTool("node", ["-e", "process.stdout.write((function(){" + src + "})())"]);
-        process.exit(r.status == null ? 0 : r.status);
+        const { r, ms } = timeRun(() => runTool("node", ["-e", "process.stdout.write((function(){" + src + "})())"]));
+        const st = r.status == null ? 0 : r.status;
+        if (st === 0) timingLine(cmd, b.compileMs, ms, o);
+        process.exit(st);
       }
+      timingLine(cmd, b.compileMs, null, o);
       break;
     }
     default:

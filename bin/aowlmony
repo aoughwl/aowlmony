@@ -113,6 +113,16 @@ function resolveTools() {
   const t = {
     nimony:    pick("AOWLMONY_NIMONY",    "nimony",    firstExisting([path.join(HOME, "nimony/bin/nimony")])),
     niflerReal:pick("AOWLMONY_NIFLER",    "nifler",    firstExisting([path.join(HOME, "nimony/bin/nifler")])),
+    // real nimsem — used ONLY as the mechanical `.s.nif → .s.idx.nif` indexer
+    // (the `x`/GenerateIdx subcommand walks the sem'd NIF; it does NO semantic
+    // analysis) when OUR aowlsem does the actual semchecking. See semShimScript.
+    nimsemReal:pick("AOWLMONY_NIMSEM",    "nimsem",    firstExisting([path.join(HOME, "nimony/bin/nimsem")])),
+    // OUR semantic checker (aowlsem). Injected via a `nimsem` shim only when the
+    // active profile selects the aowlsem variant; see compile().
+    // NB: do NOT seed this from reg("sem") — the registry's sem slot holds the
+    // ACTIVE variant's exe, which is nimony's own nimsem until the default flips.
+    // The registry only overrides below, when slots.sem.variant is aowlsem.
+    aowlsem:   pick("AOWLMONY_AOWLSEM",   "aowlsem",   firstExisting([path.join(HOME, "aowlsem/bin/aowlsem")])),
     nifparser: pick("AOWLMONY_NIFPARSER", "nifparser", firstExisting(nifparserCandidates())),
     nifiInterp:pick("AOWLMONY_NIFI",      "nifiInterp",reg("interp") || firstExisting(repoBin("nifi", "-interp"))),
     nifiVm:    pick("AOWLMONY_NIFI_VM",   "nifiVm",    reg("vm")     || firstExisting(repoBin("nifi", "-vm"))),
@@ -132,7 +142,10 @@ function resolveTools() {
   t.profile       = st.profile || "hybrid";
   t.parserVariant = (slots.parser || {}).variant || "aowlparser";
   t.hexerVariant  = (slots.hexer  || {}).variant || "aowlhexer";
-  t.semVariant    = (slots.sem    || {}).variant || "nimsem";
+  // AOWLMONY_SEM env forces the sem variant (aowlsem|nimsem) for one run,
+  // ahead of the aowlup registry — lets you exercise sem=aowlsem before the
+  // registry default flips.
+  t.semVariant    = process.env.AOWLMONY_SEM || (slots.sem || {}).variant || "nimsem";
   if (t.parserVariant === "aowlparser" && reg("parser")) t.nifparser = process.env.AOWLMONY_NIFPARSER || process.env.AIFMONY_NIFPARSER || cfg.nifparser || reg("parser");
   if (t.hexerVariant === "aowlhexer" && reg("hexer"))    t.aifhexer  = process.env.AOWLMONY_HEXER || process.env.AIFMONY_HEXER || cfg.aifhexer  || reg("hexer");
   return t;
@@ -192,6 +205,64 @@ fi
 `;
 }
 
+// The nimsem-compatible shim: OUR aowlsem semchecks each single module; the
+// real nimsem is reused ONLY as the mechanical `.s.nif → .s.idx.nif` indexer
+// (its `x`/GenerateIdx subcommand walks the sem'd NIF, no semantic analysis).
+// nimony invokes nimsem as:  --base:B --nimcache:NC m [--isSystem|--isMain] <p.nif>…
+// aowlsem's `m` wants:        m <in.p.nif> <out.s.nif> [--base:] [--nimcache:] -p:LIB [--noSystem]
+// (out path and search path are explicit for aowlsem; nimsem derives them).
+// Cyclic module GROUPS (>1 file in one call) aren't handled by aowlsem yet, so
+// those calls fall back to the real nimsem unchanged.
+function semShimScript(t, libDir) {
+  return `#!/usr/bin/env bash
+AOWLSEM=${JSON.stringify(t.aowlsem)}
+NIMSEM=${JSON.stringify(t.nimsemReal)}
+LIB=${JSON.stringify(libDir)}
+DBG="\${AOWLMONY_SEM_DEBUG:-}"
+[ -n "$DBG" ] && { echo "=== shim raw argv ($#): $*"; echo "cwd=$(pwd)"; } >> /tmp/shimtrace.log
+mode=""; base=""; nc=""; issystem=0; seen_cmd=0; files=()
+for a in "$@"; do
+  if [ "$seen_cmd" = 0 ]; then
+    case "$a" in
+      --base:*) base="$a" ;;
+      --nimcache:*) nc="$a" ;;
+      m) mode=m; seen_cmd=1 ;;
+      x) mode=x; seen_cmd=1 ;;
+      e|idetools) mode=other; seen_cmd=1 ;;
+    esac
+  else
+    case "$a" in
+      --isSystem) issystem=1 ;;
+      --isMain) : ;;
+      *) files+=("$a") ;;
+    esac
+  fi
+done
+# Only a plain single-module 'm' is ours; everything else → real nimsem verbatim.
+if [ "$mode" != "m" ] || [ "\${#files[@]}" -ne 1 ]; then
+  [ -n "$DBG" ] && echo "aowlsem-shim: defer to nimsem (mode=$mode files=\${#files[@]})" >&2
+  exec "$NIMSEM" "$@"
+fi
+in="\${files[0]}"
+out="\${in%.p.nif}.s.nif"
+sargs=(m "$in" "$out")
+[ -n "$base" ] && sargs+=("$base")
+[ -n "$nc" ] && sargs+=("$nc")
+sargs+=("-p:$LIB")
+[ "$issystem" = 1 ] && sargs+=("--noSystem")
+[ -n "$DBG" ] && echo "aowlsem-shim: aowlsem \${sargs[*]}" >&2
+if [ -n "$DBG" ]; then
+  "$AOWLSEM" "\${sargs[@]}" >>/tmp/shimtrace.log 2>&1; rc=$?
+  echo "aowlsem rc=$rc; out exists: $([ -f "$out" ] && wc -c <"$out" || echo NO)" >> /tmp/shimtrace.log
+  [ "$rc" -ne 0 ] && exit $rc
+else
+  "$AOWLSEM" "\${sargs[@]}" || exit $?
+fi
+# mechanical index sidecar (.s.nif → .s.idx.nif); pure NIF walk, no semantics
+exec "$NIMSEM" x "$out"
+`;
+}
+
 // Run aowlparser → nimony (sem+hexer) and return { dir, mainHash, snif, cnif, pnif }.
 // The staging dir is persistent and keyed by the source path so `nimony c`'s
 // incremental cache is reused across invocations (only the first run is cold).
@@ -227,13 +298,30 @@ function compile(nimFile, o, t) {
     fs.rmSync(hexerShim);   // ensure a stale shim doesn't linger in the cache
   }
   o._usedAifhexer = useAifhexer;
+  // Stage a `nimsem` shim → aowlsem so nimony's build (findTool("nimsem")) uses
+  // OUR semantic checker — only when the profile selects the aowlsem variant.
+  // AOWLMONY_NO_AOWLSEM=1 forces nimony's nimsem regardless. The shim translates
+  // nimsem's `m` argv to aowlsem's, and reuses real nimsem's `x` subcommand as a
+  // mechanical indexer (no semantics). See semShimScript.
+  const wantAowlsem = (t.semVariant || "nimsem") === "aowlsem";
+  const useAowlsem = wantAowlsem && t.aowlsem && fs.existsSync(t.aowlsem) && !process.env.AOWLMONY_NO_AOWLSEM;
+  const semShim = path.join(stage, "nimsem");
+  if (useAowlsem) {
+    const libDir = path.join(path.dirname(path.dirname(t.nimony)), "lib");
+    fs.writeFileSync(semShim, semShimScript(t, libDir));
+    fs.chmodSync(semShim, 0o755);
+  } else if (fs.existsSync(semShim)) {
+    fs.rmSync(semShim);   // ensure a stale shim doesn't linger in the cache
+  }
+  o._usedAowlsem = useAowlsem;
   const nc = path.join(stage, "nc");
 
   const env = Object.assign({}, process.env, {
     NIFRW_USER: abs,
     PATH: stage + path.delimiter + process.env.PATH,
   });
-  log(o, "nifparser parses", path.basename(abs) + "; sem via nimony;",
+  log(o, "nifparser parses", path.basename(abs) + ";",
+    useAowlsem ? "sem via aowlsem (ours)" : "sem via nimony nimsem;",
     useAifhexer ? "lowering via aowlhexer (ours)" : "lowering via nimony hexer");
   const r = cp.spawnSync(t.nimony, ["c", "--nimcache:" + nc, abs],
     { cwd: stage, env, encoding: "utf8" });
@@ -327,9 +415,9 @@ function main() {
     return;
   }
 
-  if (t.semVariant === "aowlsem")
+  if (t.semVariant === "aowlsem" && !(t.aowlsem && fs.existsSync(t.aowlsem)))
     console.error("  " + C.amber("!") + " " + C.gray("profile selects ") + C.cyan("sem=aowlsem") +
-      C.gray(", but aowlsem can't yet semcheck std/system in the nimony-c build — using nimony sem (auto-adopts when aowlsem covers system)"));
+      C.gray(", but the aowlsem binary was not found (build ~/aowlsem/bin/aowlsem or set AOWLMONY_AOWLSEM) — using nimony sem"));
 
   if (cmd === "parse") {
     const f = o._[0]; if (!f) fail("parse needs a .nim file");

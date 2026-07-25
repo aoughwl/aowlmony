@@ -124,6 +124,9 @@ function resolveTools() {
     // The registry only overrides below, when slots.sem.variant is aowlsem.
     aowlsem:   pick("AOWLMONY_AOWLSEM",   "aowlsem",   firstExisting([path.join(HOME, "aowlsem/bin/aowlsem")])),
     nifparser: pick("AOWLMONY_NIFPARSER", "nifparser", firstExisting(nifparserCandidates())),
+    // OUR quick-fix / diagnostics layer (aowlsuggest). Consulted on a compile
+    // failure to surface a fix + the command to apply it; also backs `aowlmony fix`.
+    aowlsuggest:pick("AOWLMONY_AOWLSUGGEST","aowlsuggest",reg("suggest") || firstExisting([path.join(HOME, "aowlsuggest/bin/aowlsuggest")])),
     nifiInterp:pick("AOWLMONY_NIFI",      "nifiInterp",reg("interp") || firstExisting(repoBin("nifi", "-interp"))),
     nifiVm:    pick("AOWLMONY_NIFI_VM",   "nifiVm",    reg("vm")     || firstExisting(repoBin("nifi", "-vm"))),
     nifc:      pick("AOWLMONY_NIFC",      "nifc",      reg("native") || firstExisting(repoBin("nifc"))),
@@ -266,6 +269,62 @@ exec "$NIMSEM" x "$out"
 // Run aowlparser → nimony (sem+hexer) and return { dir, mainHash, snif, cnif, pnif }.
 // The staging dir is persistent and keyed by the source path so `nimony c`'s
 // incremental cache is reused across invocations (only the first run is cold).
+// On a build failure, surface the COMPILER's own diagnostics — not nifmake's
+// internals. nimony prints `path(line, col) Error: msg` on STDOUT; nifmake writes
+// a `FAILURE: <…build.nif>` driver line on STDERR that means nothing to a user.
+// We show the real diagnostics (the staged `../../…` path rewritten back to the
+// file the user named), drop the driver noise (unless -v), then — if aowlsuggest
+// recognizes the mistake — print its guidance + the one command that fixes it.
+function reportCompileFailure(r, nimFile, abs, stage, o, t) {
+  const src = path.resolve(abs);
+  let staged = null;
+  try { staged = path.relative(stage, src); } catch (_) {}
+  const clean = (s) => { if (staged) s = s.split(staged).join(nimFile); return s.split(src).join(nimFile); };
+  const isNoise = (s) =>
+    /^\s*FAILURE:\s/.test(s) || /\bnifmake\b/.test(s) || /\.build\.nif\b/.test(s) ||
+    /\.deps\.nif\b/.test(s) || (stage && s.includes(stage)) || /^\s*[✗×]\s/.test(s);
+  const lines = ((r.stdout || "") + "\n" + (r.stderr || ""))
+    .split(/\r?\n/).map((s) => s.replace(/\s+$/, "")).filter((s) => s.trim() && !isNoise(s));
+  const errs = lines.filter((s) => /\bError:/.test(s));
+  const show = errs.length ? errs : lines;
+  if (show.length) { for (const s of show) console.error("  " + C.red(clean(s))); }
+  else { const raw = ((r.stdout || "") + (r.stderr || "")).trim(); if (raw) console.error(clean(raw)); }
+  if (o.verbose && r.stderr) { console.error(C.gray("  [verbose] raw driver output:")); process.stderr.write(r.stderr); }
+  suggestFixHints(nimFile, abs, t);
+}
+
+// Ask aowlsuggest whether it recognizes (and can fix) anything in the file — many
+// cryptic sem errors are a habit from another language (function→proc, else if→
+// elif, <T>→[T], unterminated string, mismatched bracket…). Print its guidance +
+// the exact command to apply the fix. Best-effort: silent if the tool is absent
+// or has nothing to say, and never blocks the primary error.
+function suggestFixHints(nimFile, abs, t) {
+  const bin = t && t.aowlsuggest;
+  if (!bin || !fs.existsSync(bin)) return;
+  let parsed;
+  try {
+    const rr = cp.spawnSync(bin, ["check", abs, "--format:json"], { encoding: "utf8" });
+    const out = (rr.stdout || "").trim();
+    if (!out) return;
+    parsed = JSON.parse(out);
+  } catch (_) { return; }
+  let diags = [];
+  if (Array.isArray(parsed)) diags = parsed;
+  else if (parsed && Array.isArray(parsed.files)) for (const f of parsed.files) diags.push(...(f.diagnostics || []));
+  if (diags.length === 0) return;
+  let anyFix = false;
+  console.error("");
+  console.error("  " + C.cyan("aowlsuggest") + C.gray(" recognizes this — likely a cross-language habit:"));
+  for (const d of diags.slice(0, 6)) {
+    const at = d.line ? ":" + d.line + (d.col ? ":" + d.col : "") : "";
+    const tip = d.fix ? C.gray("  → " + d.fix) : "";
+    console.error("    " + C.amber("•") + " " + C.gray(nimFile + at) + "  " + (d.message || d.code || "") + tip);
+    if (d.fix || d.autofixable) anyFix = true;
+  }
+  if (diags.length > 6) console.error("    " + C.gray("… " + (diags.length - 6) + " more (aowlsuggest lint " + nimFile + ")"));
+  if (anyFix) console.error("  " + C.gray("apply the auto-fixes: ") + C.cyan("aowlmony fix " + nimFile));
+}
+
 function compile(nimFile, o, t) {
   if (!fs.existsSync(nimFile)) fail("no such file: " + nimFile);
   const abs = path.resolve(nimFile);
@@ -316,6 +375,25 @@ function compile(nimFile, o, t) {
   o._usedAowlsem = useAowlsem;
   const nc = path.join(stage, "nc");
 
+  // Content-freshness guard. nifmake's needsRebuild is mtime-only: it rebuilds a
+  // node only when a source's mtime is strictly newer than the cached output. A
+  // same-second edit, coarse mtime granularity, or an mtime-preserving editor/copy
+  // leaves mtime unchanged, so a genuine content change would silently reuse the
+  // stale build — even a corrupted file would "run" the previous output. We hash
+  // the entry source and, when its content changed since the last build, bump its
+  // mtime so nifmake rebuilds the affected chain (the incremental cache for
+  // unchanged deps — stdlib etc. — is preserved).
+  try {
+    const shaPath = path.join(stage, ".entry.sha256");
+    const cur = require("crypto").createHash("sha256").update(fs.readFileSync(abs)).digest("hex");
+    let prev = "";
+    try { prev = fs.readFileSync(shaPath, "utf8").trim(); } catch (_) {}
+    if (cur !== prev) {
+      try { const now = new Date(); fs.utimesSync(abs, now, now); } catch (_) {}
+      try { fs.writeFileSync(shaPath, cur); } catch (_) {}
+    }
+  } catch (_) {}
+
   const env = Object.assign({}, process.env, {
     NIFRW_USER: abs,
     PATH: stage + path.delimiter + process.env.PATH,
@@ -338,9 +416,16 @@ function compile(nimFile, o, t) {
       }
     }
   }
-  if (!mainHash) {
-    if (r.status !== 0) { process.stderr.write(r.stderr || r.stdout || ""); fail("nimony frontend failed"); }
-    fail("could not locate the compiled main module (.c.nif) in " + nc);
+  // Treat the build as failed if it emitted a diagnostic — NOT merely if no
+  // .c.nif exists. A failed rebuild leaves the PREVIOUS build's .c.nif in the
+  // cache, so a mainHash match alone would silently run stale output (nimony `c`
+  // can even exit 0 on failure). `path(line,col) Error:` is nimony's format;
+  // `error[code]` is aowlparser's.
+  const hadError = r.status !== 0 ||
+    /(\bError:|error\[)/.test((r.stdout || "") + "\n" + (r.stderr || ""));
+  if (!mainHash || hadError) {
+    reportCompileFailure(r, nimFile, abs, stage, o, t);
+    fail("compile failed");
   }
   const snif = path.join(nc, mainHash + ".s.nif");
   const pnif = path.join(nc, mainHash + ".p.nif");
@@ -401,6 +486,8 @@ function main() {
       ["py FILE", "emit idiomatic Python"],
       ["parse FILE", "show OUR .p.nif"],
       ["nif FILE", "compile only; print .s/.c.nif paths"],
+      ["fix FILE [--dry-run]", "apply aowlsuggest quick-fixes (cross-language habits)"],
+      ["lint FILE", "aowlsuggest diagnostics only (no compile)"],
     ];
     for (const [a, d] of rows) console.log("  " + C.teal(a) + " ".repeat(Math.max(1, 26 - a.length)) + C.gray(d));
     console.log("");
@@ -423,6 +510,22 @@ function main() {
     const f = o._[0]; if (!f) fail("parse needs a .nim file");
     const r = runTool(t.nifparser, ["p", f, "-"]);   // '-' output → stdout
     process.exit(r.status || 0);
+  }
+
+  // aowlsuggest passthrough — quick-fixes & diagnostics over the source, no
+  // compile needed. `fix` applies the verified auto-fixes (use --dry-run to
+  // preview a diff); `lint`/`check` just report. This is the same layer the
+  // compile-failure path consults to suggest a fix + command.
+  if (cmd === "fix" || cmd === "lint" || cmd === "check") {
+    const f = o._[0]; if (!f) fail(cmd + " needs a .nim file");
+    if (!fs.existsSync(f)) fail("no such file: " + f);
+    if (!t.aowlsuggest || !fs.existsSync(t.aowlsuggest))
+      fail("aowlsuggest not found — build ~/aowlsuggest/bin/aowlsuggest or set AOWLMONY_AOWLSUGGEST");
+    const extra = [];
+    if (cmd === "fix") extra.push(process.argv.includes("--dry-run") ? "--dry-run" : "--write");
+    for (const a of process.argv.slice(2)) if (/^--(format:|style:|pedantic|stats|quiet|color)/.test(a)) extra.push(a);
+    const r = runTool(t.aowlsuggest, [cmd, f, ...extra]);
+    process.exit(r.status == null ? 0 : r.status);
   }
 
   const file = o._[0];

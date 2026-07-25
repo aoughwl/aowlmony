@@ -11,6 +11,31 @@ wherever they exist, and reusing nimony's for the parts not yet rebuilt.
                                           aowli (ours) ◄── interpret ──────────┘        └──► aowlc (ours) ──► C ──► gcc ──► native
 ```
 
+## Quick start
+
+New here? One command takes a `.nim` file all the way to a running program:
+
+```sh
+aowlmony run foo.nim        # compile foo.nim → native binary → run it
+```
+
+That's the whole happy path. Everything below is optional — it's either a
+*different way to run the same file* (an interpreter, or emitting TS/Py/JS) or a
+knob for *which* toolchain does the work.
+
+| I want to… | command |
+|---|---|
+| **just run my program** | `aowlmony run foo.nim` |
+| build a binary, don't run it | `aowlmony build foo.nim -o foo` |
+| run it in the interpreter (full runtime, debuggable) | `aowlmony interp foo.nim` |
+| call one proc and print its result | `aowlmony exec foo.nim --entry fib --arg 20` |
+| emit idiomatic TypeScript / Python / JavaScript | `aowlmony ts foo.nim` · `py` · `js` |
+
+**Expert knobs:** add `-v` to see which components ran; put `+aowl` / `+nimony` /
+`+hybrid` *before* the command to force a whole-stack profile for one build
+(e.g. `aowlmony +nimony run foo.nim`). Everything else lives in `aowlup` (the
+toolchain manager) — `aowlmony` only ever *compiles*.
+
 ## Manager + driver — `aowlup : aowlmony`
 
 The toolchain interface is two tools, modelled on **`rustup` : `cargo`**:

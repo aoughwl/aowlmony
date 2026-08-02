@@ -29,6 +29,7 @@ knob for *which* toolchain does the work.
 | build a binary, don't run it | `aowlmony build foo.nim -o foo` |
 | run it in the interpreter (full runtime, debuggable) | `aowlmony interp foo.nim` |
 | call one proc and print its result | `aowlmony exec foo.nim --entry fib --arg 20` |
+| check the backends agree on it | `aowlmony verify foo.nim` |
 | emit idiomatic TypeScript / Python / JavaScript | `aowlmony ts foo.nim` · `py` · `js` |
 
 **Expert knobs:** add `-v` to see which components ran; put `+aowl` / `+nimony` /
@@ -80,12 +81,54 @@ aowlmony build  prog.nim -o prog                # native: emit a binary
 aowlmony exec   prog.nim --entry fib --arg 20   # native: call one proc, print result (→ 6765)
 aowlmony interp prog.nim                        # interpret via aowli (full runtime)
 aowlmony vm     prog.nim                        # interpret via aowli's bytecode VM
+aowlmony verify prog.nim                        # run both; report the first divergent op
 aowlmony ts     prog.nim [--faithful] [--run]   # idiomatic TypeScript
 aowlmony py     prog.nim [--run]                # idiomatic Python
 aowlmony js     prog.nim [--faithful] [--run]   # idiomatic / native JavaScript
 aowlmony parse  prog.nim                        # show OUR aowlparser .p.aif
 aowlmony nif    prog.nim -v                     # .p/.s/.c.aif paths + which parser/hexer ran
 ```
+
+## `verify` — do the backends actually agree?
+
+Every realizer hangs off **one** front end, so if native and interpreted disagree
+about the same program, the bug is in a *backend*, not in parsing or sem.
+`aowlmony verify` makes that a one-command check: it builds `.c.aif` → binary with
+aowlc, runs `.s.aif` under aowli, and compares stdout, stderr and exit status.
+
+On a mismatch it does not just say "differs" — it re-runs the interpreted leg
+under `aowli --trace`, rebuilds the output stream from the traced
+`write(stdout, …)` ops, finds the op that produced the **first divergent byte**,
+and prints that op with its source line:
+
+```
+  ✗ verify │ output agrees, exit status does not
+    native      → exit 128 (SIGFPE)
+    interpreted → exit 0
+    last interpreted op dv(7, 0)
+
+error: execution ended here
+  ┌─ divzero.nim:4:1
+  │
+3 │ var z = 0
+4 │ let r = dv(7, z)
+  │ ^^^^^^^^^^^^^^^^ execution ended here
+```
+
+That example is a real finding: `7 div 0` traps `SIGFPE` natively and quietly
+yields `0` under aowli.
+
+Exit codes: **0** the legs agree, **1** they diverge, **2** a leg could not run
+(e.g. the native build failed — reported as such, never as a divergence).
+`--timeout:N` bounds each leg (default 30s); a leg that times out while the other
+finishes *is* a divergence — one realizer doesn't terminate.
+
+Two honest limits, both upstream in aowli's trace format
+(`src/aowli/trace.nim`): trace arguments are truncated at 48 chars, so
+byte-exact attribution is *checked* (the rebuilt stream is compared against the
+real stdout) and the report says so when it can only prefix-match; and the trace
+carries a **line but no file**, so an op inside the stdlib is attributed by
+walking up its call chain to the innermost frame that lands inside your module.
 
 ## How it finds its tools
 

@@ -1,0 +1,8 @@
+(.nif27)
+(.vendor "Nifler")
+(.dialect "nim-deps")
+(stmts
+ (include osalloc)
+ (include
+  (when
+   (prefix not UseDestructors))"system/avltree"))

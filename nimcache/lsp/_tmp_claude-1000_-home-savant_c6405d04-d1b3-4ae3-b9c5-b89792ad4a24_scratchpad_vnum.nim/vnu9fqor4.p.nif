@@ -1,0 +1,16 @@
+(.nif27)
+(.vendor "Nifler")
+(.dialect "nim-parsed")
+(stmts@,1,../../../tmp/claude-1000/-home-savant/c6405d04-d1b3-4ae3-b9c5-b89792ad4a24/scratchpad/vnum.nim
+ (proc sq@5 . . .
+  (params@7
+   (param@1 n . . int@3 .))int@A . .
+  (stmts@N
+   (infix@2 * n~2 n@2)))
+ (var@4,2 i . . . 1@4)
+ (while@,3
+  (infix@8 <= i~2 5@3)
+  (stmts@2,1
+   (cmd echo
+    (call@7 sq~2 i@1))
+   (cmd@,1 inc i@4))))

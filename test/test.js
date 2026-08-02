@@ -81,6 +81,46 @@ console.log("faithful mode (int64-exact) on bignum.nim:");
   check("ts fast bignum.nim differs (proves faithful matters)", fast !== ref ? "differs" : "same", "differs");
 }
 
+// --- verify: differential native vs interpreted ---------------------------
+// `verify` runs both realizers off the one front end and, on a mismatch, names
+// the op that produced the first divergent byte. Three things are asserted: the
+// agreement path, the "native leg did not build" path (aowlc cannot yet emit any
+// program that touches `stdout`, so this is the common case), and — against a
+// REAL aowli trace — that a byte offset in the output is attributed to the write
+// op that produced it. Exit codes: 0 agree, 1 diverge, 2 a leg could not run.
+console.log("verify (native ≡ interpreted):");
+{
+  const v = aifmony(["verify", path.join(EX, "compute.nim")]);
+  check("verify compute.nim agrees", v.status === 0 && /native ≡ interpreted/.test(v.err) ? "agree" : v.err.slice(0, 120), "agree");
+  const h = aifmony(["verify", path.join(EX, "hello.nim")]);
+  check("verify hello.nim reports the unbuildable native leg",
+    h.status === 2 && /native leg did not build/.test(h.err) ? "native-leg-failed" : `status=${h.status}`, "native-leg-failed");
+
+  // a divergence with a source location: `7 div 0` traps SIGFPE natively and
+  // returns 0 under aowli, so verify must report it AND point at the call site.
+  const dz = path.join(os.tmpdir(), "aowlmony-test-divzero.nim");
+  fs.writeFileSync(dz, "proc dv(a, b: int): int = a div b\n\nvar z = 0\nlet r = dv(7, z)\ndiscard r\n");
+  const d = aifmony(["verify", dz]);
+  check("verify div-by-zero diverges", d.status, 1);
+  check("verify div-by-zero names the source line",
+    /aowlmony-test-divzero\.nim:4/.test(d.err) ? "located" : d.err.slice(0, 160), "located");
+
+  // attribution, against a real trace: which write op produced a given byte?
+  const V = require(path.join(ROOT, "bin", "aowlmony"));   // the shim exports nothing
+  const tr = cp.spawnSync("node", [AIFMONY, "interp", "--trace", path.join(EX, "hello.nim")], { encoding: "utf8" });
+  const p = V.parseTrace(tr.stderr || "");
+  const outText = tr.stdout || "";
+  const at = V.attribute(p.writes.stdout, outText, outText.indexOf("42"));
+  check("attribution rebuilds the traced stdout exactly", at.exact, true);
+  check("attribution names the op that printed 42", at.op && at.op.argstr, "stdout, 42");
+  check("attribution of byte 0 names the first write", V.attribute(p.writes.stdout, outText, 0).op.argstr,
+    "stdout, hello from aifmony");
+  // trace-arg escaping round-trips (trace.nim argText collapses \n and \t)
+  check("unescapeArg restores a newline", JSON.stringify(V.unescapeArg("a\\nb").text), JSON.stringify("a\nb"));
+  check("unescapeArg flags a 48-char truncated arg", V.unescapeArg("x".repeat(45) + "...").truncated, true);
+  check("firstDiff on a prefix points past the shorter stream", V.firstDiff("ab", "abc"), 2);
+}
+
 // --- provenance: the user module is parsed by OUR nifparser ---------------
 console.log("provenance:");
 const nif = aifmony(["nif", path.join(EX, "compute.nim"), "-v"]);

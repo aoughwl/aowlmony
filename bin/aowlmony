@@ -23,11 +23,12 @@
 //   aowlmony ts     <file.nim> [--faithful] [--run] idiomatic TypeScript via aowlts
 //   aowlmony py     <file.nim> [--run]              idiomatic Python via aowlpy
 //   aowlmony js     <file.nim> [--faithful] [--run] idiomatic JavaScript via aowljs
+//   aowlmony verify <file.nim>                      native vs interpreted; first divergent op
 //   aowlmony parse  <file.nim>                      show OUR aowlparser .p.aif
 //   aowlmony nif    <file.nim>                      compile only; print .s.aif / .c.aif paths
 //
 // Options: -o/--out, --entry, --arg (repeatable), --engine c|aowlc, --faithful,
-//   --run, --keep, -v/--verbose
+//   --run, --keep, --timeout:N (verify, seconds), -v/--verbose
 //
 // The ts/py/js commands produce the sem'd .s.aif (same artifact as interp) and
 // run the matching idiomatic backend (aowlts/aowljs/aowlpy) to emit source next
@@ -249,6 +250,8 @@ function parseArgs(argv) {
     else if (a === "-e") o.eval = argv[++i];
     else if (a === "--arg") o.args.push(argv[++i]);
     else if (a === "--engine") o.engine = argv[++i];
+    else if (/^--timeout:/.test(a)) o.timeout = Number(a.slice(10)) || 30;
+    else if (a === "--timeout") o.timeout = Number(argv[++i]) || 30;
     else if (a === "--faithful") o.faithful = true;
     else if (a === "--run") o.run = true;
     else if (a === "--keep") o.keep = true;
@@ -666,6 +669,269 @@ function outPath(nimFile, o, ext) {
   return path.join(path.dirname(abs), path.basename(abs, path.extname(abs)) + "." + ext);
 }
 
+// ---- verify: differential execution (native ≡ interpreted) -------------------
+// Both realizers hang off ONE front end (aowlparser → sem → hexer), so a
+// disagreement here is a *backend* divergence, never a parse/sem difference: the
+// same .c.nif goes to aowlc → gcc, the same .s.nif goes to aowli. We compare
+// stdout, stderr and exit status; on a mismatch the interpreted leg is re-run
+// under `--trace` so the first divergent byte can be attributed to the op that
+// produced it, with the source line that op came from.
+
+function capture(bin, args, timeoutMs, opts = {}) {
+  const r = cp.spawnSync(bin, args, Object.assign(
+    { encoding: "utf8", timeout: timeoutMs, maxBuffer: 64 * 1024 * 1024 }, opts));
+  const timedOut = !!(r.error && r.error.code === "ETIMEDOUT");
+  return {
+    out: r.stdout || "", err: r.stderr || "", timedOut,
+    status: r.status == null ? (r.signal ? 128 : 1) : r.status,
+    signal: r.signal || null,
+    spawnError: r.error && !timedOut ? String(r.error.message || r.error) : null,
+  };
+}
+
+// Index of the first differing character, or -1 when equal. When one is a strict
+// prefix of the other the divergence is *at* the end of the shorter stream.
+function firstDiff(a, b) {
+  const n = Math.min(a.length, b.length);
+  for (let i = 0; i < n; i++) if (a[i] !== b[i]) return i;
+  return a.length === b.length ? -1 : n;
+}
+function offsetToLineCol(s, i) {
+  let line = 1, col = 1;
+  for (let k = 0; k < i && k < s.length; k++) { if (s[k] === "\n") { line++; col = 1; } else col++; }
+  return { line, col };
+}
+// A one-line, printable rendering of the bytes around a divergence point.
+function around(s, i, n = 24) {
+  const seg = s.slice(i, i + n);
+  const shown = JSON.stringify(seg);
+  return i >= s.length ? C.dim("<end of output>")
+    : shown + (s.length > i + n ? C.dim(" …") : "");
+}
+
+// Undo trace.nim argText()'s one-line escaping. It renders an argument longer
+// than 48 chars as `s[0..44] & "..."`, so a 48-char chunk ending in "..." is
+// (almost certainly) truncated — and byte-exact reconstruction is off from there.
+function unescapeArg(s) {
+  const truncated = s.length === 48 && s.endsWith("...");
+  const body = truncated ? s.slice(0, -3) : s;
+  let out = "";
+  for (let i = 0; i < body.length; i++) {
+    if (body[i] === "\\" && body[i + 1] === "n") { out += "\n"; i++; }
+    else if (body[i] === "\\" && body[i + 1] === "t") { out += "\t"; i++; }
+    else out += body[i];
+  }
+  return { text: out, truncated };
+}
+
+// Parse aowli's `--trace` stream (stderr) into an ordered op list. Indentation is
+// two spaces per depth (trace.nim `indent`), `→` opens a frame, `←` closes it,
+// `·` is a step with no call. Each op keeps the live frame chain above it so a
+// stdlib op can be walked back up to user code.
+function parseTrace(text) {
+  const ops = [], writes = { stdout: [], stderr: [] }, stack = [];
+  let truncatedTrace = false;
+  for (const raw of text.split("\n")) {
+    if (!raw.trim()) continue;
+    if (/\(trace truncated at/.test(raw)) { truncatedTrace = true; continue; }
+    if (/^-- trace:/.test(raw)) continue;
+    const lead = raw.match(/^ */)[0].length;
+    const depth = lead >> 1;
+    const body = raw.slice(lead);
+    if (body[0] === "←") { stack.length = Math.min(stack.length, depth); continue; }
+    if (body[0] !== "→") continue;
+    let rest = body.slice(2);
+    let line = 0;
+    const m = rest.match(/ {2}:(\d+)$/);
+    if (m) { line = Number(m[1]); rest = rest.slice(0, rest.length - m[0].length); }
+    const open = rest.indexOf("(");
+    if (open < 0 || !rest.endsWith(")")) continue;
+    stack.length = depth;
+    const op = {
+      idx: ops.length, depth, line, callee: rest.slice(0, open),
+      argstr: rest.slice(open + 1, -1),
+      chain: stack.map((f) => ({ callee: f.callee, line: f.line })),
+    };
+    stack.push(op); ops.push(op);
+    // `echo` lowers to `write(stdout, …)`; that argument IS the emitted text.
+    const w = /^(stdout|stderr), ([\s\S]*)$/.exec(op.argstr);
+    if (op.callee === "write" && w) {
+      const u = unescapeArg(w[2]);
+      op.stream = w[1]; op.chunk = u.text; op.chunkTruncated = u.truncated;
+      writes[w[1]].push(op);
+    }
+  }
+  return { ops, writes, truncatedTrace };
+}
+
+// Which traced write produced byte `off` of `actual`? We rebuild the stream from
+// the write ops and check it against what the program really printed — `exact`
+// is false when the rebuild disagrees (truncated args, or output from a path the
+// tracer did not record), so the named op is a best prefix match, not a proof.
+function attribute(writeOps, actual, off) {
+  let pos = 0, hit = null, exact = true;
+  for (const op of writeOps) {
+    if (op.chunkTruncated) exact = false;
+    const end = pos + op.chunk.length;
+    if (hit === null && off < end) hit = op;
+    if (actual.slice(pos, end) !== op.chunk) exact = false;
+    pos = end;
+  }
+  if (pos !== actual.length) exact = false;
+  if (hit === null) hit = writeOps.length ? writeOps[writeOps.length - 1] : null;
+  return { op: hit, exact };
+}
+
+// aowli's trace records a LINE but no FILE (src/aowli/trace.nim traceEnter takes
+// `line` only), so we attribute to the innermost frame whose line falls inside
+// the entry module — a stdlib frame (echo → write at system.nim:472) falls
+// outside it and we keep walking up the chain to the user's call site.
+function locateOp(op, absSrc) {
+  let lines;
+  try { lines = fs.readFileSync(absSrc, "utf8").split(/\r?\n/); } catch (_) { return null; }
+  const frames = [...op.chain, op];
+  for (let i = frames.length - 1; i >= 0; i--) {
+    const f = frames[i];
+    if (f.line > 0 && f.line <= lines.length) {
+      const text = lines[f.line - 1] || "";
+      const col = Math.max(1, text.length - text.trimStart().length + 1);
+      return { line: f.line, col, endCol: Math.max(col, text.trimEnd().length), callee: f.callee, self: i === frames.length - 1 };
+    }
+  }
+  return null;
+}
+
+// Render the divergence: where in the output, what each leg produced, which op
+// produced it, and the source line that op came from.
+function reportDivergence(what, nat, int_, off, tr, absSrc, nimFile) {
+  const { line, col } = offsetToLineCol(nat.length > off ? nat : int_, off);
+  console.error("");
+  console.error("  " + C.red(G.cross) + " " + C.bold(C.red("verify")) + " " + C.gray(G.bar) + " " +
+    C.gray("native ") + C.red("≢") + C.gray(" interpreted"));
+  console.error("");
+  console.error("  " + C.bold("first divergence") + C.gray("  in " + what + " at line " + line + ", col " + col +
+    "  (byte " + off + ")"));
+  console.error("    " + C.cyan("native      ") + C.gray(G.arrow) + " " + around(nat, off));
+  console.error("    " + C.violet("interpreted ") + C.gray(G.arrow) + " " + around(int_, off));
+  if (!tr) { console.error(""); return; }
+  const { op, exact } = tr;
+  if (!op) {
+    console.error("");
+    console.error("  " + C.amber("!") + " " + C.gray("no traced write op covers that byte — the interpreted leg " +
+      "produced this output outside a recorded call"));
+    console.error("");
+    return;
+  }
+  console.error("");
+  const head = op.callee + "(" + op.argstr + ")";
+  console.error("  " + C.bold("produced by") + "       " + C.teal(head) +
+    C.dim("   op #" + op.idx + " of the interpreted run"));
+  if (!exact) console.error("  " + C.amber("!") + " " + C.gray("attribution is approximate: the rebuilt trace " +
+    "stream does not match the run's stdout byte-for-byte (aowli truncates trace args at 48 chars)"));
+  const chain = [...op.chain, op].filter((f) => f.line > 0)
+    .map((f) => f.callee + C.dim(":" + f.line));
+  if (chain.length) console.error("  " + C.bold("call chain") + "        " + chain.join(C.gray(" " + G.arrow + " ")));
+  const loc = locateOp(op, absSrc);
+  console.error("");
+  if (loc) {
+    renderDiag({
+      severity: "error", code: null, file: nimFile, line: loc.line, col: loc.col, endCol: loc.endCol,
+      message: "native and interpreted disagree here",
+      helps: loc.self ? [] : [{ kind: "note", text: "innermost user frame; the divergent op itself (" +
+        op.callee + ") is inside the stdlib, which aowli's trace records by line only — no file" }],
+    }, path.resolve(absSrc), nimFile);
+  } else {
+    console.error("  " + C.amber("!") + " " + C.gray("no source location: every frame on this op's chain is " +
+      "outside " + nimFile + " (aowli's trace carries a line but no file, so stdlib frames cannot be resolved)"));
+  }
+  console.error("");
+}
+
+function verifyCmd(b, file, absSrc, o, t) {
+  const timeoutMs = (o.timeout || 30) * 1000;
+  const say = (s) => console.error("  " + s);
+
+  // native leg: build first, then run the binary — so a BUILD failure is never
+  // mistaken for the program writing to stderr (`aowlc run` merges the two).
+  const bin = path.join(os.tmpdir(), "aowlmony-verify-" + process.pid);
+  const nb = capture("node", [t.nifc, "build", b.cnif, "-o", bin], timeoutMs);
+  if (nb.status !== 0 || !fs.existsSync(bin)) {
+    console.error("");
+    say(C.red(G.cross) + " " + C.bold(C.red("verify")) + " " + C.gray(G.bar) + " " +
+      C.gray("the native leg did not build — nothing to compare against"));
+    say(C.gray("  aowlc build failed (status " + nb.status + "); first diagnostics:"));
+    for (const l of (nb.err || nb.out).split("\n").filter((x) => /error|Error/.test(x)).slice(0, 4))
+      say(C.dim("    " + l.trim()));
+    say(C.gray("  the interpreted leg is unaffected — `aowlmony interp " + file + "` still runs it"));
+    console.error("");
+    process.exit(2);
+  }
+  const nat = capture(bin, o.progArgs || [], timeoutMs);
+  const itp = capture(t.nifiInterp, aowliArgs(b.snif, absSrc, o, false), timeoutMs);
+  try { fs.unlinkSync(bin); } catch (_) {}
+  for (const [name, r] of [["native", nat], ["interpreted", itp]]) {
+    if (r.spawnError) fail(name + " leg could not run: " + r.spawnError);
+    if (r.timedOut) {
+      console.error("");
+      say(C.red(G.cross) + " " + C.bold(C.red("verify")) + " " + C.gray(G.bar) + " the " + name +
+        " leg hit the " + o.timeout + "s timeout (raise it with " + C.teal("--timeout:N") + ")");
+      say(C.gray("  the other leg finished, so this is itself a divergence: one realizer does not terminate"));
+      console.error("");
+      process.exit(1);
+    }
+  }
+
+  // Compare stdout first (that is what programs are judged on), then stderr,
+  // then exit status. Only re-run under --trace when something actually differs.
+  const checks = [["stdout", nat.out, itp.out], ["stderr", nat.err, itp.err]];
+  for (const [what, a, c] of checks) {
+    const off = firstDiff(a, c);
+    if (off < 0) continue;
+    const traced = capture(t.nifiInterp,
+      ["--trace", ...aowliArgs(b.snif, absSrc, o, false).filter((x) => !/^--trace/.test(x))], timeoutMs);
+    const p = parseTrace(traced.err);
+    if (p.truncatedTrace) say(C.amber("!") + " " + C.gray("aowli truncated the trace at its 200k-line cap; " +
+      "attribution past that point is unavailable"));
+    reportDivergence(what, a, c, off, attribute(p.writes[what] || [], c, off), absSrc, file);
+    process.exit(1);
+  }
+  if (nat.status !== itp.status || nat.signal !== itp.signal) {
+    const traced = capture(t.nifiInterp,
+      ["--trace", ...aowliArgs(b.snif, absSrc, o, false).filter((x) => !/^--trace/.test(x))], timeoutMs);
+    const p = parseTrace(traced.err);
+    const last = p.ops.length ? p.ops[p.ops.length - 1] : null;
+    console.error("");
+    say(C.red(G.cross) + " " + C.bold(C.red("verify")) + " " + C.gray(G.bar) + " " +
+      C.gray("output agrees, ") + C.red("exit status does not"));
+    say("  " + C.cyan("native      ") + C.gray(G.arrow) + " exit " + nat.status + (nat.signal ? " (" + nat.signal + ")" : ""));
+    say("  " + C.violet("interpreted ") + C.gray(G.arrow) + " exit " + itp.status + (itp.signal ? " (" + itp.signal + ")" : ""));
+    if (last) {
+      say("  " + C.gray("last interpreted op ") + C.teal(last.callee + "(" + last.argstr + ")"));
+      const loc = locateOp(last, absSrc);
+      console.error("");
+      if (loc) renderDiag({ severity: "error", code: null, file, line: loc.line, col: loc.col,
+        endCol: loc.endCol, message: "execution ended here", helps: [] }, path.resolve(absSrc), file);
+    }
+    console.error("");
+    process.exit(1);
+  }
+
+  // agreed — say exactly what was compared, so a trivial "both printed nothing"
+  // never reads like a strong result.
+  const nLines = nat.out === "" ? 0 : nat.out.split("\n").length - (nat.out.endsWith("\n") ? 1 : 0);
+  console.error("");
+  say(C.green(G.ok) + " " + C.bold(C.green("verify")) + " " + C.gray(G.bar) + " " +
+    C.gray("native ") + C.green("≡") + C.gray(" interpreted"));
+  say("  " + C.dim("stdout " + nat.out.length + "B / " + nLines + " line" + (nLines === 1 ? "" : "s") +
+    " · stderr " + nat.err.length + "B · exit " + nat.status));
+  if (!nat.out.length && !nat.err.length)
+    say("  " + C.amber("!") + " " + C.gray("both legs produced no output — agreement here is weak evidence"));
+  say("  " + C.dim("native aowlc→gcc · interpreted aowli · shared front end " +
+    (b.byOurParser ? "aowlparser" : "nifler") + "→sem→hexer"));
+  console.error("");
+  process.exit(0);
+}
+
 function main() {
   const argv = process.argv.slice(2);
   // `+profile` (rustup-style) = compile with an ephemeral toolchain profile for
@@ -687,6 +953,7 @@ function main() {
       ["vm FILE", "interpret via aowli bytecode VM"],
       ["ts|js FILE [--faithful]", "emit idiomatic TypeScript / JavaScript"],
       ["py FILE", "emit idiomatic Python"],
+      ["verify FILE", "run native + interpreted, report the first divergent op"],
       ["parse FILE", "show OUR .p.nif"],
       ["nif FILE", "compile only; print .s/.c.nif paths"],
       ["fix FILE [--dry-run]", "apply aowlsuggest quick-fixes (cross-language habits)"],
@@ -698,7 +965,7 @@ function main() {
       C.dim("  parser=") + C.cyan(t.parserVariant) + C.dim(" hexer=") + C.cyan(t.hexerVariant) +
       C.dim(" sem=") + C.cyan(t.semVariant) + C.dim("   one-shot: ") + C.teal("aowlmony +nimony run <file>"));
     console.log("  " + C.gray("options ") + G.arrow + " " +
-      C.dim("-o  --entry  --arg  --engine  --faithful  --run  --keep  --no-time  -v"));
+      C.dim("-o  --entry  --arg  --engine  --faithful  --run  --keep  --no-time  --timeout:N  -v"));
     console.log("  " + C.gray("aowli   ") + G.arrow + " " +
       C.dim("interp/vm/eval forward --trace[-full|-profile] --trace-depth:N, the hybrid ") +
       C.dim("family (--hybrid --build-native --interpret: --native-src: --native-lib:), and ") + C.teal("-- ARG…") + C.dim(" to the program"));
@@ -762,6 +1029,9 @@ function main() {
       console.log(".p.nif  " + b.pnif + (b.byOurParser ? "  (nifparser)" : "  (nifler)"));
       console.log(".s.nif  " + b.snif);
       console.log(".c.nif  " + b.cnif);
+      break;
+    case "verify":
+      verifyCmd(b, file, absSrc, o, t);
       break;
     case "interp":
     case "eval": {
@@ -843,4 +1113,11 @@ function main() {
   }
 }
 
-try { main(); } catch (e) { fail((e && e.stack) || String(e)); }
+// Run as a CLI; when `require`d (test/test.js) expose the verify internals
+// instead, so the divergence-attribution path can be asserted against real aowli
+// traces without needing a program both backends can execute.
+if (require.main === module) {
+  try { main(); } catch (e) { fail((e && e.stack) || String(e)); }
+} else {
+  module.exports = { parseTrace, attribute, unescapeArg, firstDiff, offsetToLineCol, locateOp };
+}

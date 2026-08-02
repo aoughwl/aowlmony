@@ -230,7 +230,11 @@ function resolveTools() {
   return t;
 }
 
-function fail(msg) { console.error("  " + C.red(G.cross) + " " + C.red(msg)); process.exit(1); }
+// `verify` gives exit 1 a specific meaning — the backends disagree — so a
+// front-end compile failure must NOT land on it. COMPILE_FAIL_CODE lets that one
+// command reclassify "could not build" as 2, the same code a dead leg uses.
+let COMPILE_FAIL_CODE = 1;
+function fail(msg, code) { console.error("  " + C.red(G.cross) + " " + C.red(msg)); process.exit(code || 1); }
 function log(o, ...a) { if (o.verbose) console.error("  " + C.dim(G.dot) + " " + C.gray(a.join(" "))); }
 
 // aowli flags forwarded verbatim to the interpreter/VM (interp/vm/eval); the
@@ -615,7 +619,7 @@ function compile(nimFile, o, t) {
     /(\bError:|error\[)/.test((r.stdout || "") + "\n" + (r.stderr || ""));
   if (!mainHash || hadError) {
     reportCompileFailure(r, nimFile, abs, stage, o, t);
-    fail("compile failed");
+    fail("compile failed", COMPILE_FAIL_CODE);
   }
   const snif = path.join(nc, mainHash + ".s.nif");
   const pnif = path.join(nc, mainHash + ".p.nif");
@@ -684,6 +688,25 @@ function outPath(nimFile, o, ext) {
 // stdout, stderr and exit status; on a mismatch the interpreted leg is re-run
 // under `--trace` so the first divergent byte can be attributed to the op that
 // produced it, with the source line that op came from.
+
+// A verdict is only as good as the binaries it ran. The registry can resolve a
+// tool to an INSTALLED copy (~/.aowl/bin) that a repo checkout has since moved
+// past, and a week-old engine then reads as a backend divergence — exactly the
+// wrong conclusion. Find any candidate of the same tool that is strictly newer
+// than the one we resolved, so verify can say so instead of blaming a backend.
+function newerBuildThan(resolved, candidates) {
+  let mine;
+  try { mine = fs.statSync(resolved).mtimeMs; } catch (_) { return null; }
+  let best = null;
+  for (const c of candidates) {
+    if (!c || path.resolve(c) === path.resolve(resolved)) continue;
+    let st; try { st = fs.statSync(c); } catch (_) { continue; }
+    if (st.mtimeMs > mine && (!best || st.mtimeMs > best.mtimeMs)) best = { path: c, mtimeMs: st.mtimeMs };
+  }
+  return best ? { resolvedMs: mine, ...best } : null;
+}
+const day = (ms) => new Date(ms).toISOString().slice(0, 10);
+function stamp(p) { try { return day(fs.statSync(p).mtimeMs); } catch (_) { return "?"; } }
 
 function capture(bin, args, timeoutMs, opts = {}) {
   const r = cp.spawnSync(bin, args, Object.assign(
@@ -923,6 +946,23 @@ function verifyCmd(b, file, absSrc, o, t) {
     }
   }
 
+  // Before blaming a backend, check the engine we ran is the newest one built.
+  const stale = newerBuildThan(t.nifiInterp, repoBin("nifi", "-interp"));
+  const warnStale = () => {
+    if (!stale) return;
+    console.error("");
+    say(C.amber("!") + " " + C.bold(C.amber("this may not be a backend defect — the interpreter is not the newest build")));
+    say("  " + C.gray("ran    ") + C.cyan(t.nifiInterp.replace(HOME, "~")) + C.dim("  " + day(stale.resolvedMs)));
+    say("  " + C.gray("newer  ") + C.cyan(stale.path.replace(HOME, "~")) + C.dim("  " + day(stale.mtimeMs)));
+    say("  " + C.gray("re-run with ") + C.teal("AOWLMONY_NIFI=" + stale.path.replace(HOME, "~")) +
+      C.gray(" before reporting this as an aowli bug"));
+  };
+  const provenance = () =>
+    say("  " + C.dim("native " + (which === "aowlc" ? "aowlc→gcc" : "nimony's C backend") + " " +
+      stamp(bin) + " · interpreted " + path.basename(t.nifiInterp) + " " + stamp(t.nifiInterp) +
+      " · front end " + (b.byOurParser ? "aowlparser" : "nifler") + "→sem→" +
+      (o._usedAifhexer ? "aowlhexer" : "hexer")));
+
   // Compare stdout first (that is what programs are judged on), then stderr,
   // then exit status. Only re-run under --trace when something actually differs.
   const checks = [["stdout", nat.out, itp.out], ["stderr", nat.err, itp.err]];
@@ -935,6 +975,8 @@ function verifyCmd(b, file, absSrc, o, t) {
     if (p.truncatedTrace) say(C.amber("!") + " " + C.gray("aowli truncated the trace at its 200k-line cap; " +
       "attribution past that point is unavailable"));
     reportDivergence(what, a, c, off, attribute(p.writes[what] || [], c, off), absSrc, file, p.ops);
+    provenance(); warnStale();
+    console.error("");
     process.exit(1);
   }
   if (nat.status !== itp.status || nat.signal !== itp.signal) {
@@ -954,6 +996,7 @@ function verifyCmd(b, file, absSrc, o, t) {
       if (loc) renderDiag({ severity: "error", code: null, file, line: loc.line, col: loc.col,
         endCol: loc.endCol, message: "execution ended here", helps: [] }, path.resolve(absSrc), file);
     }
+    provenance(); warnStale();
     console.error("");
     process.exit(1);
   }
@@ -968,9 +1011,9 @@ function verifyCmd(b, file, absSrc, o, t) {
     " · stderr " + nat.err.length + "B · exit " + nat.status));
   if (!nat.out.length && !nat.err.length)
     say("  " + C.amber("!") + " " + C.gray("both legs produced no output — agreement here is weak evidence"));
-  say("  " + C.dim("native " + (which === "aowlc" ? "aowlc→gcc" : "nimony's C backend") +
-    " · interpreted aowli · shared front end " +
-    (b.byOurParser ? "aowlparser" : "nifler") + "→sem→" + (o._usedAifhexer ? "aowlhexer" : "hexer")));
+  provenance();
+  if (stale) say("  " + C.amber("!") + " " + C.gray("a newer interpreter exists (") +
+    C.cyan(stale.path.replace(HOME, "~")) + C.gray(", " + day(stale.mtimeMs) + ") — this agreement is about the older build"));
   console.error("");
   process.exit(0);
 }
@@ -1060,6 +1103,7 @@ function main() {
     } else if (!file) fail("eval needs a FILE, -e CODE, or -");
   }
   if (!file) fail(cmd + " needs a .nim file");
+  if (cmd === "verify") COMPILE_FAIL_CODE = 2;   // 1 is reserved for "they disagree"
   const absSrc = path.resolve(file);
   const b = compile(file, o, t);
   if (o.verbose) log(o, "main module", b.mainHash, "parsed by",
@@ -1162,5 +1206,6 @@ function main() {
 if (require.main === module) {
   try { main(); } catch (e) { fail((e && e.stack) || String(e)); }
 } else {
-  module.exports = { parseTrace, attribute, unescapeArg, firstDiff, offsetToLineCol, locateOp };
+  module.exports = { parseTrace, attribute, unescapeArg, firstDiff, offsetToLineCol, locateOp,
+                     newerBuildThan, repoBin };
 }

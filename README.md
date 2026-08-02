@@ -98,9 +98,16 @@ under aowli, and compares stdout, stderr and exit status.
 
 `--native:nimony` (default) uses the binary the compile **already** linked — your
 code parsed by aowlparser and lowered by aowlhexer, emitted to C by nimony — so it
-costs no extra build and handles programs that print. `--native:aowlc` verifies the
-fully self-owned C backend instead; today it cannot build any program that touches
-`stdout`, and verify says so rather than calling it a divergence.
+costs no extra build. `--native:aowlc` verifies the fully self-owned C backend
+instead; when it cannot build a program, that is reported as a leg failure, never
+as a divergence.
+
+**A verdict is only as good as the binaries it ran.** The registry can resolve a
+tool to an installed copy (`~/.aowl/bin`) that its repo checkout has moved past, and
+a week-old engine then looks exactly like a backend defect. Every verdict names the
+realizers it ran and their build dates, and if a newer build of the interpreter
+exists on disk, verify says so and tells you to re-run with `AOWLMONY_NIFI=` before
+reporting anything as an aowli bug.
 
 On a mismatch it does not just say "differs" — it re-runs the interpreted leg
 under `aowli --trace`, rebuilds the output stream from the traced
@@ -124,12 +131,18 @@ error: native and interpreted disagree here
   │ ^^^^^^^^^^^^ native and interpreted disagree here
 ```
 
-Both examples in the test suite are real findings, caught by this command:
-`s[2..5]` yields `"cdef"` natively and `"a"` under aowli, and `7 div 0` traps
-`SIGFPE` natively while aowli quietly returns `0`.
+That report was the command's first real result — and also its first lesson: the
+`"a"` was **not** an aowli defect but a stale `~/.aowl/bin/aowli-interp` shadowing a
+fixed engine, which is why verify now warns about build dates before you blame a
+backend. `7 div 0` was a genuine one: it returned `0` and exit 0 where native traps
+`SIGFPE`, now fixed in aowli, which raises `division by zero`. Native still dies on
+a signal and loses its buffered stdout, so div-by-zero stays an expected divergence
+rather than a match.
 
-Exit codes: **0** the legs agree, **1** they diverge, **2** a leg could not run
-(e.g. the native build failed — reported as such, never as a divergence).
+Exit codes: **0** the legs agree, **1** they diverge — and *only* that — **2** a leg
+could not run, which covers both a failed native build and a front-end compile
+error, so a flaky shared-`nimcache` link failure can never masquerade as a
+divergence.
 `--timeout:N` bounds each leg (default 30s); a leg that times out while the other
 finishes *is* a divergence — one realizer doesn't terminate.
 

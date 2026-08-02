@@ -252,6 +252,8 @@ function parseArgs(argv) {
     else if (a === "--engine") o.engine = argv[++i];
     else if (/^--timeout:/.test(a)) o.timeout = Number(a.slice(10)) || 30;
     else if (a === "--timeout") o.timeout = Number(argv[++i]) || 30;
+    else if (/^--native:/.test(a)) o.native = a.slice(9);
+    else if (a === "--native") o.native = argv[++i];
     else if (a === "--faithful") o.faithful = true;
     else if (a === "--run") o.run = true;
     else if (a === "--keep") o.keep = true;
@@ -620,7 +622,13 @@ function compile(nimFile, o, t) {
   // provenance check: the user module must have been parsed by OUR aowlparser
   let byOurParser = false;
   try { byOurParser = /vendor "(?:nif|aif|aowl)parser"/.test(fs.readFileSync(pnif, "utf8")); } catch (_) {}
-  return { stage, nc, mainHash, snif, cnif, pnif, byOurParser, compileMs };
+  // `nimony c` also LINKS a binary next to the module's .c.nif, named after the
+  // source stem. It costs nothing extra (we already ran that compile) and — unlike
+  // aowlc today — it handles stdout, so `verify` can use it as a native leg.
+  // Our parser and hexer still produced its IR; only the C emission is nimony's.
+  const nbin = path.join(nc, mainHash, path.basename(abs, path.extname(abs)));
+  return { stage, nc, mainHash, snif, cnif, pnif, byOurParser, compileMs,
+           nbin: fs.existsSync(nbin) ? nbin : null };
 }
 
 function runTool(bin, args, opts = {}) {
@@ -786,24 +794,32 @@ function attribute(writeOps, actual, off) {
 // `line` only), so we attribute to the innermost frame whose line falls inside
 // the entry module — a stdlib frame (echo → write at system.nim:472) falls
 // outside it and we keep walking up the chain to the user's call site.
-function locateOp(op, absSrc) {
+function locateOp(op, absSrc, ops) {
   let lines;
   try { lines = fs.readFileSync(absSrc, "utf8").split(/\r?\n/); } catch (_) { return null; }
+  const at = (line, how, callee) => {
+    const text = lines[line - 1] || "";
+    const col = Math.max(1, text.length - text.trimStart().length + 1);
+    return { line, col, endCol: Math.max(col, text.trimEnd().length), callee, how };
+  };
+  const inSrc = (f) => f.line > 0 && f.line <= lines.length;
+  // 1. the op itself, else the innermost enclosing frame that is user code.
   const frames = [...op.chain, op];
-  for (let i = frames.length - 1; i >= 0; i--) {
-    const f = frames[i];
-    if (f.line > 0 && f.line <= lines.length) {
-      const text = lines[f.line - 1] || "";
-      const col = Math.max(1, text.length - text.trimStart().length + 1);
-      return { line: f.line, col, endCol: Math.max(col, text.trimEnd().length), callee: f.callee, self: i === frames.length - 1 };
-    }
-  }
+  for (let i = frames.length - 1; i >= 0; i--)
+    if (inSrc(frames[i])) return at(frames[i].line, i === frames.length - 1 ? "self" : "caller", frames[i].callee);
+  // 2. Nothing on the chain is user code — the whole stack is inside the stdlib,
+  // which is the normal shape for a top-level `echo` (it expands to
+  // write(stdout,…) recorded at system.nim's line, with no user frame above it).
+  // The last op the interpreter ran AT a user line is then the statement in
+  // progress: for `echo s[2..5]` that is the `[]` call, recorded at the echo's
+  // own line. Preceding sibling, not ancestor — hence the separate walk.
+  if (ops) for (let i = op.idx - 1; i >= 0; i--) if (inSrc(ops[i])) return at(ops[i].line, "preceding", ops[i].callee);
   return null;
 }
 
 // Render the divergence: where in the output, what each leg produced, which op
 // produced it, and the source line that op came from.
-function reportDivergence(what, nat, int_, off, tr, absSrc, nimFile) {
+function reportDivergence(what, nat, int_, off, tr, absSrc, nimFile, ops) {
   const { line, col } = offsetToLineCol(nat.length > off ? nat : int_, off);
   console.error("");
   console.error("  " + C.red(G.cross) + " " + C.bold(C.red("verify")) + " " + C.gray(G.bar) + " " +
@@ -831,14 +847,20 @@ function reportDivergence(what, nat, int_, off, tr, absSrc, nimFile) {
   const chain = [...op.chain, op].filter((f) => f.line > 0)
     .map((f) => f.callee + C.dim(":" + f.line));
   if (chain.length) console.error("  " + C.bold("call chain") + "        " + chain.join(C.gray(" " + G.arrow + " ")));
-  const loc = locateOp(op, absSrc);
+  const loc = locateOp(op, absSrc, ops);
   console.error("");
   if (loc) {
+    const NOTE = {
+      caller: "innermost enclosing user frame — the divergent op itself (" + op.callee +
+        ") is inside the stdlib, which aowli's trace records by line only, with no file",
+      preceding: "the statement in progress: `" + op.callee + "` runs with no user frame above it " +
+        "(a top-level echo expands to write(stdout,…) inside system), so this is the last op the " +
+        "interpreter ran at a line in your module — `" + loc.callee + "`",
+    };
     renderDiag({
       severity: "error", code: null, file: nimFile, line: loc.line, col: loc.col, endCol: loc.endCol,
       message: "native and interpreted disagree here",
-      helps: loc.self ? [] : [{ kind: "note", text: "innermost user frame; the divergent op itself (" +
-        op.callee + ") is inside the stdlib, which aowli's trace records by line only — no file" }],
+      helps: NOTE[loc.how] ? [{ kind: "note", text: NOTE[loc.how] }] : [],
     }, path.resolve(absSrc), nimFile);
   } else {
     console.error("  " + C.amber("!") + " " + C.gray("no source location: every frame on this op's chain is " +
@@ -851,24 +873,44 @@ function verifyCmd(b, file, absSrc, o, t) {
   const timeoutMs = (o.timeout || 30) * 1000;
   const say = (s) => console.error("  " + s);
 
-  // native leg: build first, then run the binary — so a BUILD failure is never
-  // mistaken for the program writing to stderr (`aowlc run` merges the two).
-  const bin = path.join(os.tmpdir(), "aowlmony-verify-" + process.pid);
-  const nb = capture("node", [t.nifc, "build", b.cnif, "-o", bin], timeoutMs);
-  if (nb.status !== 0 || !fs.existsSync(bin)) {
-    console.error("");
-    say(C.red(G.cross) + " " + C.bold(C.red("verify")) + " " + C.gray(G.bar) + " " +
-      C.gray("the native leg did not build — nothing to compare against"));
-    say(C.gray("  aowlc build failed (status " + nb.status + "); first diagnostics:"));
-    for (const l of (nb.err || nb.out).split("\n").filter((x) => /error|Error/.test(x)).slice(0, 4))
-      say(C.dim("    " + l.trim()));
-    say(C.gray("  the interpreted leg is unaffected — `aowlmony interp " + file + "` still runs it"));
-    console.error("");
-    process.exit(2);
+  // Which native realizer is the leg? `nimony` (default) is the binary the
+  // compile we already ran linked — our parser + our hexer, nimony's C emission,
+  // and it handles stdout. `aowlc` is the fully self-owned C backend. No silent
+  // fallback between them: whichever was asked for is the one reported on.
+  const which = o.native || "nimony";
+  if (which !== "nimony" && which !== "aowlc") fail("--native takes nimony|aowlc, not '" + which + "'");
+  let bin = null, temp = false;
+  if (which === "nimony") {
+    bin = b.nbin;
+    if (!bin) {
+      console.error("");
+      say(C.red(G.cross) + " " + C.bold(C.red("verify")) + " " + C.gray(G.bar) + " " +
+        C.gray("nimony linked no binary for this module — nothing to compare against"));
+      say(C.gray("  try the self-owned backend instead: ") + C.teal("aowlmony verify " + file + " --native:aowlc"));
+      console.error("");
+      process.exit(2);
+    }
+  } else {
+    // build first, then run — so a BUILD failure is never mistaken for the
+    // program writing to stderr (`aowlc run` merges the two).
+    bin = path.join(os.tmpdir(), "aowlmony-verify-" + process.pid); temp = true;
+    const nb = capture("node", [t.nifc, "build", b.cnif, "-o", bin], timeoutMs);
+    if (nb.status !== 0 || !fs.existsSync(bin)) {
+      console.error("");
+      say(C.red(G.cross) + " " + C.bold(C.red("verify")) + " " + C.gray(G.bar) + " " +
+        C.gray("the aowlc native leg did not build — nothing to compare against"));
+      say(C.gray("  aowlc build failed (status " + nb.status + "); first diagnostics:"));
+      for (const l of (nb.err || nb.out).split("\n").filter((x) => /error|Error/.test(x)).slice(0, 4))
+        say(C.dim("    " + l.trim()));
+      say(C.gray("  the interpreted leg is unaffected — ") + C.teal("aowlmony interp " + file) +
+        C.gray(" runs it, and ") + C.teal("--native:nimony") + C.gray(" verifies against nimony's C backend"));
+      console.error("");
+      process.exit(2);
+    }
   }
   const nat = capture(bin, o.progArgs || [], timeoutMs);
   const itp = capture(t.nifiInterp, aowliArgs(b.snif, absSrc, o, false), timeoutMs);
-  try { fs.unlinkSync(bin); } catch (_) {}
+  if (temp) { try { fs.unlinkSync(bin); } catch (_) {} }
   for (const [name, r] of [["native", nat], ["interpreted", itp]]) {
     if (r.spawnError) fail(name + " leg could not run: " + r.spawnError);
     if (r.timedOut) {
@@ -892,7 +934,7 @@ function verifyCmd(b, file, absSrc, o, t) {
     const p = parseTrace(traced.err);
     if (p.truncatedTrace) say(C.amber("!") + " " + C.gray("aowli truncated the trace at its 200k-line cap; " +
       "attribution past that point is unavailable"));
-    reportDivergence(what, a, c, off, attribute(p.writes[what] || [], c, off), absSrc, file);
+    reportDivergence(what, a, c, off, attribute(p.writes[what] || [], c, off), absSrc, file, p.ops);
     process.exit(1);
   }
   if (nat.status !== itp.status || nat.signal !== itp.signal) {
@@ -907,7 +949,7 @@ function verifyCmd(b, file, absSrc, o, t) {
     say("  " + C.violet("interpreted ") + C.gray(G.arrow) + " exit " + itp.status + (itp.signal ? " (" + itp.signal + ")" : ""));
     if (last) {
       say("  " + C.gray("last interpreted op ") + C.teal(last.callee + "(" + last.argstr + ")"));
-      const loc = locateOp(last, absSrc);
+      const loc = locateOp(last, absSrc, p.ops);
       console.error("");
       if (loc) renderDiag({ severity: "error", code: null, file, line: loc.line, col: loc.col,
         endCol: loc.endCol, message: "execution ended here", helps: [] }, path.resolve(absSrc), file);
@@ -926,8 +968,9 @@ function verifyCmd(b, file, absSrc, o, t) {
     " · stderr " + nat.err.length + "B · exit " + nat.status));
   if (!nat.out.length && !nat.err.length)
     say("  " + C.amber("!") + " " + C.gray("both legs produced no output — agreement here is weak evidence"));
-  say("  " + C.dim("native aowlc→gcc · interpreted aowli · shared front end " +
-    (b.byOurParser ? "aowlparser" : "nifler") + "→sem→hexer"));
+  say("  " + C.dim("native " + (which === "aowlc" ? "aowlc→gcc" : "nimony's C backend") +
+    " · interpreted aowli · shared front end " +
+    (b.byOurParser ? "aowlparser" : "nifler") + "→sem→" + (o._usedAifhexer ? "aowlhexer" : "hexer")));
   console.error("");
   process.exit(0);
 }

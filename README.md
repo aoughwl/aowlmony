@@ -93,8 +93,14 @@ aowlmony nif    prog.nim -v                     # .p/.s/.c.aif paths + which par
 
 Every realizer hangs off **one** front end, so if native and interpreted disagree
 about the same program, the bug is in a *backend*, not in parsing or sem.
-`aowlmony verify` makes that a one-command check: it builds `.c.aif` → binary with
-aowlc, runs `.s.aif` under aowli, and compares stdout, stderr and exit status.
+`aowlmony verify` makes that a one-command check: it runs the program natively and
+under aowli, and compares stdout, stderr and exit status.
+
+`--native:nimony` (default) uses the binary the compile **already** linked — your
+code parsed by aowlparser and lowered by aowlhexer, emitted to C by nimony — so it
+costs no extra build and handles programs that print. `--native:aowlc` verifies the
+fully self-owned C backend instead; today it cannot build any program that touches
+`stdout`, and verify says so rather than calling it a divergence.
 
 On a mismatch it does not just say "differs" — it re-runs the interpreted leg
 under `aowli --trace`, rebuilds the output stream from the traced
@@ -102,21 +108,25 @@ under `aowli --trace`, rebuilds the output stream from the traced
 and prints that op with its source line:
 
 ```
-  ✗ verify │ output agrees, exit status does not
-    native      → exit 128 (SIGFPE)
-    interpreted → exit 0
-    last interpreted op dv(7, 0)
+  ✗ verify │ native ≢ interpreted
 
-error: execution ended here
-  ┌─ divzero.nim:4:1
+  first divergence  in stdout at line 1, col 1  (byte 0)
+    native      → "cdef\nabc\n16\nabcdefghijkl" …
+    interpreted → "a\na\n16\nabcdefghijklmnop\n" …
+
+  produced by       write(stdout, a)   op #2 of the interpreted run
+
+error: native and interpreted disagree here
+  ┌─ slice.nim:4:1
   │
-3 │ var z = 0
-4 │ let r = dv(7, z)
-  │ ^^^^^^^^^^^^^^^^ execution ended here
+3 │ let s = "abcdefghijklmnop"
+4 │ echo s[2..5]
+  │ ^^^^^^^^^^^^ native and interpreted disagree here
 ```
 
-That example is a real finding: `7 div 0` traps `SIGFPE` natively and quietly
-yields `0` under aowli.
+Both examples in the test suite are real findings, caught by this command:
+`s[2..5]` yields `"cdef"` natively and `"a"` under aowli, and `7 div 0` traps
+`SIGFPE` natively while aowli quietly returns `0`.
 
 Exit codes: **0** the legs agree, **1** they diverge, **2** a leg could not run
 (e.g. the native build failed — reported as such, never as a divergence).
@@ -127,8 +137,12 @@ Two honest limits, both upstream in aowli's trace format
 (`src/aowli/trace.nim`): trace arguments are truncated at 48 chars, so
 byte-exact attribution is *checked* (the rebuilt stream is compared against the
 real stdout) and the report says so when it can only prefix-match; and the trace
-carries a **line but no file**, so an op inside the stdlib is attributed by
-walking up its call chain to the innermost frame that lands inside your module.
+carries a **line but no file**. A top-level `echo` therefore has *no* user frame
+at all — it expands to `write(stdout, …)` recorded at system's own line — so the
+location is resolved in two steps: the innermost enclosing frame inside your
+module, and failing that the last op the interpreter ran at one of your lines
+(for `echo s[2..5]` that is the `[]` call, recorded at the echo). The report
+always states which of the two it used.
 
 ## How it finds its tools
 

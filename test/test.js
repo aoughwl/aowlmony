@@ -92,9 +92,23 @@ console.log("verify (native ≡ interpreted):");
 {
   const v = aifmony(["verify", path.join(EX, "compute.nim")]);
   check("verify compute.nim agrees", v.status === 0 && /native ≡ interpreted/.test(v.err) ? "agree" : v.err.slice(0, 120), "agree");
+  // the default native leg is the binary `nimony c` already linked, so a program
+  // that prints really is compared (aowlc cannot build one — asserted below).
   const h = aifmony(["verify", path.join(EX, "hello.nim")]);
-  check("verify hello.nim reports the unbuildable native leg",
-    h.status === 2 && /native leg did not build/.test(h.err) ? "native-leg-failed" : `status=${h.status}`, "native-leg-failed");
+  check("verify hello.nim agrees on real stdout",
+    h.status === 0 && /stdout 22B \/ 2 lines/.test(h.err) ? "agree-22B" : h.err.slice(0, 140), "agree-22B");
+  const hc = aifmony(["verify", path.join(EX, "hello.nim"), "--native:aowlc"]);
+  check("verify --native:aowlc reports the unbuildable leg",
+    hc.status === 2 && /aowlc native leg did not build/.test(hc.err) ? "native-leg-failed" : `status=${hc.status}`, "native-leg-failed");
+
+  // a REAL stdout divergence, end to end: aowli's `s[2..5]` yields "a" where
+  // native yields "cdef". verify must name the write op AND point at the echo.
+  const sl = path.join(os.tmpdir(), "aowlmony-test-slice.nim");
+  fs.writeFileSync(sl, 'import std/syncio\n\nlet s = "abcdefghijklmnop"\necho s[2..5]\n');
+  const sv = aifmony(["verify", sl]);
+  check("verify slice diverges", sv.status, 1);
+  check("verify slice names the producing op", /produced by\s+write\(stdout, a\)/.test(sv.err) ? "named" : sv.err.slice(0, 200), "named");
+  check("verify slice locates the echo", /aowlmony-test-slice\.nim:4/.test(sv.err) ? "line-4" : sv.err.slice(0, 200), "line-4");
 
   // a divergence with a source location: `7 div 0` traps SIGFPE natively and
   // returns 0 under aowli, so verify must report it AND point at the call site.

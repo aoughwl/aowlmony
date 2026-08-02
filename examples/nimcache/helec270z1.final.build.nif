@@ -1,0 +1,106 @@
+(.nif27)
+(stmts
+ (cmd :lengc "/home/savant/nimony/bin/lengc" "c" "--compileOnly" "--bits\3A64"(args)(input))
+ (cmd :hexer "/home/savant/nimony/bin/hexer" "c" "--bits\3A64" "--cpu\3Ale" "--flags\3Abr"(args)
+  (input 0))
+ (cmd :dce "/home/savant/nimony/bin/hexer" "d" "--bits\3A64" "--cpu\3Ale"(args)
+  (input 0 -1))
+ (cmd :dceLive "/home/savant/nimony/bin/hexer" "dl" "--bits\3A64" "--cpu\3Ale"(args)
+  (input 0 -1)(output))
+ (cmd :dceEmit "/home/savant/nimony/bin/hexer" "de" "--bits\3A64" "--cpu\3Ale"(args)
+  (input 0 1))
+ (cmd :cc "gcc" "-c" "-Wno-attributes" "-O1" "-I."(args)(input)"-o"(output))
+ (cmd :link "/home/savant/nimony/bin/niflink"
+  (input 0 0)(output))
+ (do dceLive
+  (input "nimcache/helec270z1/helec270z1.dce.nif")
+  (input "nimcache/sysvq0asl.dce.nif")
+  (input "nimcache/syn1lfpjv.dce.nif")
+  (input "nimcache/for2ybv4p1.dce.nif")
+  (output "nimcache/helec270z1/helec270z1.live.nif"))
+ (do dceEmit
+  (args "--outdir\3Animcache/helec270z1")
+  (input "nimcache/helec270z1/helec270z1.x.nif")
+  (input "nimcache/helec270z1/helec270z1.live.nif")
+  (output "nimcache/helec270z1/helec270z1.c.nif"))
+ (do dceEmit
+  (args "--outdir\3Animcache/helec270z1")
+  (input "nimcache/sysvq0asl.x.nif")
+  (input "nimcache/helec270z1/helec270z1.live.nif")
+  (output "nimcache/helec270z1/sysvq0asl.c.nif"))
+ (do dceEmit
+  (args "--outdir\3Animcache/helec270z1")
+  (input "nimcache/syn1lfpjv.x.nif")
+  (input "nimcache/helec270z1/helec270z1.live.nif")
+  (output "nimcache/helec270z1/syn1lfpjv.c.nif"))
+ (do dceEmit
+  (args "--outdir\3Animcache/helec270z1")
+  (input "nimcache/for2ybv4p1.x.nif")
+  (input "nimcache/helec270z1/helec270z1.live.nif")
+  (output "nimcache/helec270z1/for2ybv4p1.c.nif"))
+ (do link
+  (input "nimcache/helec270z1/helec270z1.linkmanifest.nif")
+  (input "/home/savant/nimony/nimcache_static/static.o")
+  (input "nimcache/helec270z1/helec270z1.o")
+  (input "nimcache/helec270z1/sysvq0asl.o")
+  (input "nimcache/helec270z1/syn1lfpjv.o")
+  (input "nimcache/helec270z1/for2ybv4p1.o")
+  (output "nimcache/helec270z1/hello"))
+ (do cc
+  (input "../../nimony/vendor/mimalloc/src/static.c")
+  (args "-DMI_STATS=1" "-I/home/savant/nimony/vendor/mimalloc/include")
+  (output "/home/savant/nimony/nimcache_static/static.o"))
+ (do cc
+  (input "nimcache/helec270z1/helec270z1.c")
+  (output "nimcache/helec270z1/helec270z1.o"))
+ (do lengc
+  (args "--nimcache\3Animcache/helec270z1")
+  (args "--isMain")
+  (input "nimcache/helec270z1/helec270z1.c.nif")
+  (output "nimcache/helec270z1/helec270z1.c"))
+ (do hexer
+  (args "--isMain")
+  (args "--app\3Aconsole")
+  (args "--outdir\3Animcache/helec270z1")
+  (input "nimcache/helec270z1.s.nif")
+  (input "nimcache/sysvq0asl.s.idx.nif")
+  (input "nimcache/syn1lfpjv.s.idx.nif")
+  (output "nimcache/helec270z1/helec270z1.x.nif")
+  (output "nimcache/helec270z1/helec270z1.dce.nif"))
+ (do cc
+  (input "nimcache/helec270z1/sysvq0asl.c")
+  (output "nimcache/helec270z1/sysvq0asl.o"))
+ (do lengc
+  (args "--nimcache\3Animcache/helec270z1")
+  (input "nimcache/helec270z1/sysvq0asl.c.nif")
+  (output "nimcache/helec270z1/sysvq0asl.c"))
+ (do hexer
+  (input "nimcache/sysvq0asl.s.nif")
+  (input "nimcache/sysvq0asl.s.idx.nif")
+  (output "nimcache/sysvq0asl.x.nif")
+  (output "nimcache/sysvq0asl.dce.nif"))
+ (do cc
+  (input "nimcache/helec270z1/syn1lfpjv.c")
+  (output "nimcache/helec270z1/syn1lfpjv.o"))
+ (do lengc
+  (args "--nimcache\3Animcache/helec270z1")
+  (input "nimcache/helec270z1/syn1lfpjv.c.nif")
+  (output "nimcache/helec270z1/syn1lfpjv.c"))
+ (do hexer
+  (input "nimcache/syn1lfpjv.s.nif")
+  (input "nimcache/sysvq0asl.s.idx.nif")
+  (input "nimcache/for2ybv4p1.s.idx.nif")
+  (output "nimcache/syn1lfpjv.x.nif")
+  (output "nimcache/syn1lfpjv.dce.nif"))
+ (do cc
+  (input "nimcache/helec270z1/for2ybv4p1.c")
+  (output "nimcache/helec270z1/for2ybv4p1.o"))
+ (do lengc
+  (args "--nimcache\3Animcache/helec270z1")
+  (input "nimcache/helec270z1/for2ybv4p1.c.nif")
+  (output "nimcache/helec270z1/for2ybv4p1.c"))
+ (do hexer
+  (input "nimcache/for2ybv4p1.s.nif")
+  (input "nimcache/sysvq0asl.s.idx.nif")
+  (output "nimcache/for2ybv4p1.x.nif")
+  (output "nimcache/for2ybv4p1.dce.nif")))

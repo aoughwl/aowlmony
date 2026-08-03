@@ -30,6 +30,7 @@ knob for *which* toolchain does the work.
 | run it in the interpreter (full runtime, debuggable) | `aowlmony interp foo.nim` |
 | call one proc and print its result | `aowlmony exec foo.nim --entry fib --arg 20` |
 | check the backends agree on it | `aowlmony verify foo.nim` |
+| find a pointer that outlives what it points at | `aowlmony verify foo.nim --memory` |
 | emit idiomatic TypeScript / Python / JavaScript | `aowlmony ts foo.nim` · `py` · `js` |
 
 **Expert knobs:** add `-v` to see which components ran; put `+aowl` / `+nimony` /
@@ -82,6 +83,7 @@ aowlmony exec   prog.nim --entry fib --arg 20   # native: call one proc, print r
 aowlmony interp prog.nim                        # interpret via aowli (full runtime)
 aowlmony vm     prog.nim                        # interpret via aowli's bytecode VM
 aowlmony verify prog.nim                        # run both; report the first divergent op
+aowlmony verify prog.nim --memory               # dangling/use-after-free under --fin
 aowlmony ts     prog.nim [--faithful] [--run]   # idiomatic TypeScript
 aowlmony py     prog.nim [--run]                # idiomatic Python
 aowlmony js     prog.nim [--faithful] [--run]   # idiomatic / native JavaScript
@@ -146,16 +148,67 @@ divergence.
 `--timeout:N` bounds each leg (default 30s); a leg that times out while the other
 finishes *is* a divergence — one realizer doesn't terminate.
 
-Two honest limits, both upstream in aowli's trace format
+One honest limit remains, upstream in aowli's trace format
 (`src/aowli/trace.nim`): trace arguments are truncated at 48 chars, so
 byte-exact attribution is *checked* (the rebuilt stream is compared against the
-real stdout) and the report says so when it can only prefix-match; and the trace
-carries a **line but no file**. A top-level `echo` therefore has *no* user frame
-at all — it expands to `write(stdout, …)` recorded at system's own line — so the
-location is resolved in two steps: the innermost enclosing frame inside your
-module, and failing that the last op the interpreter ran at one of your lines
-(for `echo s[2..5]` that is the `[]` call, recorded at the echo). The report
-always states which of the two it used.
+real stdout) and the report says so when it can only prefix-match.
+`AOWLI_TRACE_ARGCAP=0` lifts the cap. Call sites now carry a **file** as well as
+a line, so a frame is user code because its file says so; against an older
+interpreter that emits a bare `:line`, verify falls back to "the innermost frame
+whose line lands inside your module" and says which rule it used. A top-level
+`echo` has *no* user frame at all — it expands to `write(stdout, …)` recorded at
+syncio's own line — so the fallback also walks back to the last op run at one of
+your lines (for `echo s[2..5]`, the `[]` call).
+
+## `verify --memory` — dangling pointers and use-after-free
+
+`--fin` is what makes destruction observable: it routes the module through the
+destroyer, so `=destroy` actually runs at scope exit instead of the program
+leaking quietly to the end. `aowlmony verify prog.nim --memory` asks the
+question that mode enables — **does any pointer outlive the storage it names?**
+
+```
+  ✗ verify --memory │ 1 defect, 1 confirmed under --fin
+
+  use after free   `p` is used after the storage it points at was destroyed
+    allocated → uaf.nim:12:9   `b` is declared here
+    freed     → uaf.nim:14   end of the scope opened at uaf.nim:11 — =destroy witnessed here
+    used      → uaf.nim:15:7   executed on this run
+
+error: `p` is used after the storage it points at was destroyed
+   ┌─ uaf.nim:15:7
+   │
+14 │     use(p)
+15 │   use(p)
+   │       ^^ `p` is used after the storage it points at was destroyed
+   = note: confirmed: the --fin run destroyed `b` and then reached this line
+```
+
+Neither half of the toolchain can answer this alone, which is why the check is
+built from both. The `--fin` trace knows a destructor ran and where, but renders
+every object argument as `(object)` — no identity — so it cannot say *which*
+storage died or who still points at it. The sem'd `.s.nif` has the identities
+and the scopes but no idea which paths execute. So the dangling pointer is found
+structurally in the NIF, and then the `--fin` run is asked to **witness** it: a
+`=destroy` at the scope that was blamed, and the use site actually being
+reached. Findings are labelled by how much was observed — `confirmed` means both
+halves were seen, and a finding that was never on this run's path says so
+instead of borrowing the confidence of one that was.
+
+It also traps the address of a local escaping through a `return`. That one is
+reported at the `addr`, not at the `ret`: a lowered `ret` usually carries no line
+info of its own and inherits the routine's, which would point the diagnostic at
+the `proc` header instead of the line that leaks the address.
+
+**A clean verdict states what it examined** — `3 address-taking sites · 2 bound
+to a named pointer and tracked across 7 scopes`. Without that, a sound program
+and an analysis that never reached your module print the same green tick. The
+same counters expose the real limit: the analysis is **intraprocedural**, so an
+address handed straight to a call (`bar(addr x)`) is counted but not followed
+into the callee, and the report says how many of those it saw.
+
+Exit codes: **0** nothing dangles, **1** at least one defect, **2** the module
+did not compile.
 
 ## How it finds its tools
 

@@ -172,6 +172,69 @@ console.log("verify (native ≡ interpreted):");
   check("locateOp rejects a stdlib frame by file, not by line range", loc, null);
 }
 
+// --- verify --memory: dangling pointers under --fin ------------------------
+// The negative cases carry the weight. A checker that flags the real defect but
+// also flags `let p = addr b; use(p)` in one scope is a noise generator, so the
+// clean programs are asserted as hard as the broken ones.
+console.log("verify --memory:");
+{
+  const V = require(path.join(ROOT, "bin", "aowlmony"));
+  const TYPES = "import std/syncio\n\ntype Buf = object\n  data: string\n\n" +
+                "proc use(p: ptr Buf) =\n  echo \"use: \", p.data\n\n";
+  const write = (stem, body) => {
+    const f = path.join(os.tmpdir(), "aowlmony-test-" + stem + ".nim");
+    fs.writeFileSync(f, TYPES + body);
+    return f;
+  };
+  // p outlives the block that owns b, and is read afterwards.
+  const uaf = write("uaf",
+    "proc main() =\n  var p: ptr Buf\n  block:\n    var b = Buf(data: \"hello\")\n" +
+    "    p = addr b\n    use(p)\n  use(p)\n\nmain()\n");
+  const r = aifmony(["verify", uaf, "--memory"]);
+  check("verify --memory traps the use after free", r.status, 1);
+  check("verify --memory names the allocation site", /:12:9\b/.test(r.err) ? "alloc@12:9" : r.err.slice(0, 200), "alloc@12:9");
+  check("verify --memory names the use site", /:15:7\b/.test(r.err) ? "use@15:7" : r.err.slice(0, 200), "use@15:7");
+  check("verify --memory names the freeing scope", /end of the scope opened at .*:11\b/.test(r.err), true);
+  check("verify --memory confirms it against the --fin run", /1 confirmed under --fin/.test(r.err), true);
+  check("verify --memory witnesses the destructor", /=destroy witnessed here/.test(r.err), true);
+
+  // same scope: b and p die together, so nothing dangles.
+  const same = aifmony(["verify", write("memok1",
+    "proc main() =\n  var b = Buf(data: \"hi\")\n  let p = addr b\n  use(p)\n\nmain()\n"), "--memory"]);
+  check("a pointer that dies with its target is not a defect", same.status, 0);
+  // rebound after the block: the dangling value never reaches the use.
+  const rebound = aifmony(["verify", write("memok2",
+    "proc main() =\n  var p: ptr Buf\n  var keep = Buf(data: \"kept\")\n  block:\n" +
+    "    var b = Buf(data: \"hi\")\n    p = addr b\n    use(p)\n  p = addr keep\n  use(p)\n\nmain()\n"), "--memory"]);
+  check("reassigning the pointer clears the dangling state", rebound.status, 0);
+
+  // returning the address of a local: reported at the `addr`, not at the `ret`
+  // (a lowered `ret` inherits the routine's line info and would point at `proc`).
+  const esc = aifmony(["verify", write("memesc",
+    "proc mk(): ptr Buf =\n  var b = Buf(data: \"gone\")\n  result = addr b\n\n" +
+    "proc main() =\n  let p = mk()\n  echo p.data\n\nmain()\n"), "--memory"]);
+  check("verify --memory traps an escaping address", esc.status, 1);
+  check("escaping address is reported at the addr, not the proc header",
+    /escapes.*:11:/.test(esc.err) ? "at-addr" : esc.err.slice(0, 200), "at-addr");
+
+  // a clean run must state what it examined, so "clean" cannot be confused with
+  // "the analysis never reached this module".
+  const none = aifmony(["verify", path.join(EX, "hello.nim"), "--memory"]);
+  check("no addresses at all is reported as such, not as a pass", none.status, 0);
+  check("a clean verdict reports its coverage", /0 address-taking sites/.test(none.err), true);
+
+  // the reader itself: base62 deltas are relative to the PARENT node.
+  const forms = V.nifParse('(stmts@,1,a.nim (proc@,8 :main.0.@5 (var@4 :p.1)))');
+  const pos = (n) => n.pos.file + ":" + n.pos.line + ":" + n.pos.col;
+  check("nifParse resolves an absolute file position", pos(forms[0]), "a.nim:1:0");
+  check("nifParse accumulates a line delta against the parent", pos(forms[0].kids[0]), "a.nim:9:0");
+  check("nifParse accumulates a col delta against the parent", pos(forms[0].kids[0].kids[1]), "a.nim:9:4");
+  check("nifAtom decodes a negative col delta", V.nifAtom("use.0.~3").suf.col, -3);
+  check("nifAtom decodes base62 above 9", V.nifAtom("x@H").suf.col, 17);
+  check("nifAtom ignores an @ inside a string literal", V.nifAtom('"a@b"').suf, null);
+  check("nifAtom still finds the suffix after a string literal", V.nifAtom('"a@b"@2').suf.col, 2);
+}
+
 // --- provenance: the user module is parsed by OUR nifparser ---------------
 console.log("provenance:");
 const nif = aifmony(["nif", path.join(EX, "compute.nim"), "-v"]);

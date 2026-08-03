@@ -24,11 +24,12 @@
 //   aowlmony py     <file.nim> [--run]              idiomatic Python via aowlpy
 //   aowlmony js     <file.nim> [--faithful] [--run] idiomatic JavaScript via aowljs
 //   aowlmony verify <file.nim>                      native vs interpreted; first divergent op
+//   aowlmony verify <file.nim> --memory             dangling/use-after-free under --fin
 //   aowlmony parse  <file.nim>                      show OUR aowlparser .p.aif
 //   aowlmony nif    <file.nim>                      compile only; print .s.aif / .c.aif paths
 //
 // Options: -o/--out, --entry, --arg (repeatable), --engine c|aowlc, --faithful,
-//   --run, --keep, --timeout:N (verify, seconds), -v/--verbose
+//   --run, --keep, --memory (verify), --timeout:N (verify, seconds), -v/--verbose
 //
 // The ts/py/js commands produce the sem'd .s.aif (same artifact as interp) and
 // run the matching idiomatic backend (aowlts/aowljs/aowlpy) to emit source next
@@ -258,6 +259,7 @@ function parseArgs(argv) {
     else if (a === "--timeout") o.timeout = Number(argv[++i]) || 30;
     else if (/^--native:/.test(a)) o.native = a.slice(9);
     else if (a === "--native") o.native = argv[++i];
+    else if (a === "--memory") o.memory = true;
     else if (a === "--faithful") o.faithful = true;
     else if (a === "--run") o.run = true;
     else if (a === "--keep") o.keep = true;
@@ -681,6 +683,298 @@ function outPath(nimFile, o, ext) {
   return path.join(path.dirname(abs), path.basename(abs, path.extname(abs)) + "." + ext);
 }
 
+// ---- a minimal NIF reader (tokens → tree with absolute source positions) ----
+// The driver has always consumed .nif artifacts, but only ever regexed them.
+// `verify --memory` needs real structure — which scope a variable belongs to,
+// which expression took its address — so this is an actual reader.
+//
+// Line info is the part worth stating: every token may carry an `@col,line,file`
+// suffix whose numbers are base62 deltas RELATIVE TO THE ENCLOSING PARENT NODE
+// (not to the previous sibling), a leading `~` negates, and a filename makes the
+// position absolute rather than a delta. Columns are 0-based in the stream.
+// Mirrors nifreader.handleLineInfo.
+
+const b62 = (c) => {
+  const k = c.charCodeAt(0);
+  if (k >= 48 && k <= 57) return k - 48;     // 0-9  → 0..9
+  if (k >= 65 && k <= 90) return k - 55;     // A-Z  → 10..35
+  if (k >= 97 && k <= 122) return k - 61;    // a-z  → 36..61
+  return null;
+};
+
+// Split one raw atom into its text and its decoded suffix. The search for the
+// `@`/`~` starts AFTER any quoted literal, so an `@` inside a string literal is
+// never mistaken for line info.
+function nifAtom(tok) {
+  let start = 0;
+  if (tok[0] === '"' || tok[0] === "'") {
+    const q = tok[0];
+    let j = 1;
+    while (j < tok.length && tok[j] !== q) { if (tok[j] === "\\") j++; j++; }
+    start = Math.min(j + 1, tok.length);
+  }
+  const rel = tok.slice(start).search(/[@~]/);
+  if (rel < 0) return { text: tok, suf: null };
+  const at = start + rel;
+  let s = tok.slice(at);
+  if (s[0] === "@") s = s.slice(1);
+  let i = 0;
+  const num = () => {
+    let neg = false, v = 0, d;
+    if (s[i] === "~") { neg = true; i++; }
+    while (i < s.length && (d = b62(s[i])) !== null) { v = v * 62 + d; i++; }
+    return neg ? -v : v;
+  };
+  const col = num();
+  let line = 0, file = null;
+  if (s[i] === ",") { i++; line = num(); }
+  if (s[i] === ",") file = s.slice(i + 1);
+  return { text: tok.slice(0, at), suf: { col, line, file } };
+}
+
+const nifPos = (parent, suf) =>
+  !suf ? parent
+  : suf.file ? { file: suf.file, line: suf.line, col: suf.col }
+  : { file: parent.file, line: parent.line + suf.line, col: parent.col + suf.col };
+
+// Parse the whole artifact into top-level forms. Nodes are {kind:"n",tag,pos,kids},
+// atoms {kind:"a",text,pos}. `.` (the omitted slot) stays an ordinary atom so the
+// fixed child-slot layout of declarations is preserved by index.
+function nifParse(text) {
+  const top = [], stack = [];
+  const root = { file: null, line: 0, col: 0 };
+  const push = (nd) => (stack.length ? stack[stack.length - 1].kids.push(nd) : top.push(nd));
+  const parentPos = () => (stack.length ? stack[stack.length - 1].pos : root);
+  let i = 0;
+  const n = text.length;
+  while (i < n) {
+    const c = text[i];
+    if (c === " " || c === "\n" || c === "\r" || c === "\t") { i++; continue; }
+    if (c === ")") { stack.pop(); i++; continue; }
+    const open = c === "(";
+    if (open) i++;
+    let j = i;
+    const q = text[j];
+    if (!open && (q === '"' || q === "'")) {
+      j++;
+      while (j < n && text[j] !== q) { if (text[j] === "\\") j++; j++; }
+      j++;                                   // past the closing quote…
+    }
+    while (j < n && !/[\s()]/.test(text[j])) j++;   // …then any line-info suffix
+    const { text: t, suf } = nifAtom(text.slice(i, j));
+    if (open) {
+      const nd = { kind: "n", tag: t, pos: nifPos(parentPos(), suf), kids: [] };
+      push(nd); stack.push(nd);
+    } else {
+      push({ kind: "a", text: t, pos: nifPos(parentPos(), suf) });
+    }
+    i = j;
+  }
+  return top;
+}
+
+// ---- verify --memory: dangling pointers and use-after-free ------------------
+// A pointer goes dangling when the storage it names is destroyed while the
+// pointer itself is still live. `--fin` is what makes that observable: it routes
+// the module through the destroyer, so `=destroy` really runs at scope exit
+// instead of the program leaking quietly to the end.
+//
+// Neither half alone is enough to report honestly. The trace knows a destructor
+// ran and where, but renders every object argument as `(object)` — no identity,
+// so it cannot say WHICH storage died or who still points at it. The .s.nif has
+// the identities and the scopes but no idea which paths execute. So: find the
+// dangling pointer structurally, then ask the `--fin` run to witness it, and
+// label the finding by how much of it was actually observed.
+
+const NIF_VARS = new Set(["var", "let", "cursor", "gvar", "glet", "tvar", "tlet", "const"]);
+const NIF_ADDR = new Set(["addr", "haddr"]);
+// projections: expressions that name storage INSIDE some root variable, so the
+// address of any of them dangles exactly when the root variable does.
+const NIF_PROJ = new Set(["dot", "ddot", "at", "arrat", "tupat", "pat", "deref", "hderef",
+                          "conv", "hconv", "cast", "baseobj"]);
+const NIF_ROUTINE = new Set(["proc", "func", "method", "converter", "iterator", "macro", "template"]);
+// nodes that own a nested scope: a `stmts` directly under one of these belongs
+// to that construct, and should be reported as "the block opened at <its line>".
+const NIF_OWNER = new Set(["block", "while", "for", "if", "elif", "else", "of", "case",
+                           "try", "except", "fin", "finally", "scope"]);
+
+function rootSym(x) {
+  if (!x) return null;
+  if (x.kind === "a") return /^[A-Za-z_][A-Za-z0-9_.]*$/.test(x.text) ? x.text : null;
+  if (NIF_PROJ.has(x.tag)) return rootSym(x.kids[0]);
+  return null;
+}
+const symName = (s) => String(s).split(".")[0];
+
+// The whole analysis. Returns findings, each with an allocation site, the point
+// the storage was destroyed, and the site that used the pointer afterwards.
+function memoryFindings(nifText, absSrc, stageDir) {
+  const forms = nifParse(nifText);
+  const findings = [];
+  const inEntry = (pos) => {
+    if (!pos || !pos.file) return false;
+    try { return path.resolve(stageDir, pos.file) === absSrc; } catch (_) { return false; }
+  };
+
+  // Coverage, not decoration. A checker whose walk never reached the entry
+  // module would report "clean" for exactly the same reason a sound program
+  // does, so the counts are part of the result: `sites` 0 means the file has no
+  // address-taking at all, and the report has to say that rather than claim a
+  // verdict it never computed.
+  const stats = { sites: 0, tracked: 0, scopes: 0 };
+
+  const declScope = new Map();   // sym  → the scope that owns it
+  const declPos = new Map();     // sym  → where it was declared
+  const borrow = new Map();      // ptr  → { target } : ptr holds target's address
+  const dead = new Map();        // ptr  → { target, alloc, free, opened }
+  const live = new Set();
+  const reported = new Set();
+
+  // Does `x` yield the address of some variable's storage? Either directly
+  // (`addr v`, `addr v.field`) or by copying a pointer that already holds one.
+  // `at` is where the address was TAKEN. Carrying it matters: a lowered `ret`
+  // often has no line info of its own and inherits the routine's, so anchoring
+  // an escaping-address report on the `ret` would point at `proc mk(...)`
+  // instead of the line that actually leaks the address.
+  function borrowOf(x) {
+    if (!x) return null;
+    if (x.kind === "a") { const b = borrow.get(x.text); return b ? { target: b.target, at: b.at } : null; }
+    if (NIF_ADDR.has(x.tag)) {
+      const t = rootSym(x.kids[0]);
+      return t ? { target: t, at: (x.kids[0] && x.kids[0].pos) || x.pos } : null;
+    }
+    if (NIF_PROJ.has(x.tag) || x.tag === "hconv") return borrowOf(x.kids[0]);
+    return null;
+  }
+
+  function useSym(sym, pos) {
+    const d = dead.get(sym);
+    if (!d || !inEntry(pos)) return;
+    const key = sym + "@" + pos.line + ":" + pos.col;
+    if (reported.has(key)) return;
+    reported.add(key);
+    findings.push({ kind: "uaf", ptr: symName(sym), target: symName(d.target),
+                    alloc: d.alloc, free: d.free, opened: d.opened, use: pos });
+  }
+
+  function mark(scope, pos) {
+    if (!inEntry(pos)) return;
+    if (!scope.exit || pos.line > scope.exit.line) scope.exit = pos;
+  }
+
+  // Leaving a scope destroys everything declared in it. Any pointer that
+  // OUTLIVES the scope and holds one of those addresses is dangling from here.
+  function close(scope) {
+    for (const v of scope.vars) {
+      live.delete(v);
+      if (!inEntry(declPos.get(v))) continue;
+      for (const [p, b] of borrow) {
+        if (b.target !== v || !live.has(p)) continue;   // a pointer that dies too is fine
+        if (declScope.get(p) === scope) continue;       // …including one from this very scope
+        dead.set(p, { target: v, alloc: declPos.get(v),
+                      free: scope.exit || scope.opened, opened: scope.opened });
+      }
+    }
+    if (scope.parent && scope.exit) mark(scope.parent, scope.exit);
+  }
+
+  function walk(x, scope, routine, owner) {
+    if (x.kind === "a") { mark(scope, x.pos); useSym(x.text, x.pos); return; }
+    mark(scope, x.pos);
+    const tag = x.tag;
+    if (NIF_ADDR.has(tag) && inEntry(x.pos)) stats.sites++;
+
+    if (tag === "stmts" || tag === "scope") {
+      if (inEntry(x.pos)) stats.scopes++;
+      const inner = { parent: scope, vars: [], exit: null,
+                      opened: owner || x.pos, inRoutine: !!routine };
+      for (const k of x.kids) walk(k, inner, routine, NIF_OWNER.has(tag) ? x.pos : null);
+      close(inner);
+      return;
+    }
+    if (NIF_ROUTINE.has(tag)) {
+      for (const k of x.kids) walk(k, scope, x, x.pos);
+      return;
+    }
+    if (NIF_VARS.has(tag)) {
+      // (var :sym export pragmas Type value) — the value is slot 4.
+      const name = x.kids[0];
+      const init = x.kids[4];
+      if (init) walk(init, scope, routine, x.pos);
+      if (name && name.kind === "a" && name.text[0] === ":") {
+        const sym = name.text.slice(1);
+        declScope.set(sym, scope); declPos.set(sym, name.pos);
+        scope.vars.push(sym); live.add(sym);
+        dead.delete(sym); borrow.delete(sym);
+        const b = borrowOf(init);
+        if (b) { borrow.set(sym, b); if (inEntry(name.pos)) stats.tracked++; }
+      }
+      return;
+    }
+    if (tag === "asgn") {
+      const [lhs, rhs] = x.kids;
+      if (rhs) walk(rhs, scope, routine, x.pos);
+      const sym = lhs && lhs.kind === "a" ? rootSym(lhs) : null;
+      if (sym) {
+        // a whole-variable assignment REBINDS: it clears any dangling state and
+        // installs whatever the right-hand side borrows.
+        dead.delete(sym); borrow.delete(sym);
+        mark(scope, lhs.pos);
+        const b = borrowOf(rhs);
+        if (b) { borrow.set(sym, b); if (inEntry(lhs.pos)) stats.tracked++; }
+      } else if (lhs) walk(lhs, scope, routine, x.pos);
+      return;
+    }
+    if (tag === "ret" && routine) {
+      // returning the address of something this routine owns: it dies as the
+      // routine returns, so the caller receives a pointer that is already
+      // dangling. Report the site of the `addr`, not the `ret` — see borrowOf.
+      const b = borrowOf(x.kids[0]);
+      const t = b && b.target;
+      if (t && live.has(t) && declScope.get(t) && declScope.get(t).inRoutine &&
+          inEntry(declPos.get(t)) && b.at && inEntry(b.at)) {
+        const key = "ret:" + t + "@" + b.at.line;
+        if (!reported.has(key)) {
+          reported.add(key);
+          const nameTok = routine.kids[0];
+          findings.push({ kind: "escape", ptr: symName(t), target: symName(t),
+                          alloc: declPos.get(t), free: b.at, opened: routine.pos, use: b.at,
+                          routine: nameTok && nameTok.kind === "a" ? symName(nameTok.text.slice(1)) : null });
+        }
+      }
+    }
+    for (const k of x.kids) walk(k, scope, routine, NIF_OWNER.has(tag) ? x.pos : null);
+  }
+
+  const rootScope = { parent: null, vars: [], exit: null, opened: null, inRoutine: false };
+  for (const f of forms) if (f.kind === "n" && f.tag === "stmts") walk(f, rootScope, null, null);
+  close(rootScope);
+  findings.sort((a, b2) => a.use.line - b2.use.line || a.use.col - b2.use.col);
+  findings.stats = stats;
+  return findings;
+}
+
+// Did the `--fin` run actually observe this? Two independent halves: a
+// destructor that ran at the scope whose exit we blamed, and the use site being
+// reached at all. A finding with neither is still a defect — it just was not on
+// this run's path, and the report must not pretend otherwise.
+function witnessFinding(f, ops, base) {
+  const mine = ops.filter((op) => op.file === base);
+  const reached = (line) => ops.some((op) => (op.file === base && op.line === line) ||
+    op.chain.some((c) => c.file === base && c.line === line));
+  if (f.kind === "escape") {
+    // The leak is the return itself, so the witness is simply "the routine ran"
+    // — the `addr` line is usually an assignment, which is a step, not a call,
+    // and would never appear in a call trace however many times it executed.
+    const ran = !!f.routine && mine.some((op) => op.callee === f.routine);
+    return { destroyed: ran, used: ran || reached(f.use.line), confirmed: ran };
+  }
+  const lo = Math.min(f.opened ? f.opened.line : f.free.line, f.free.line);
+  const destroyed = mine.some((op) => /^=destroy/.test(op.callee) &&
+    op.line >= lo && op.line <= f.free.line);
+  return { destroyed, used: reached(f.use.line), confirmed: destroyed && reached(f.use.line) };
+}
+
 // ---- verify: differential execution (native ≡ interpreted) -------------------
 // Both realizers hang off ONE front end (aowlparser → sem → hexer), so a
 // disagreement here is a *backend* divergence, never a parse/sem difference: the
@@ -902,7 +1196,119 @@ function reportDivergence(what, nat, int_, off, tr, absSrc, nimFile, ops) {
   console.error("");
 }
 
+function verifyMemoryCmd(b, file, absSrc, o, t) {
+  const timeoutMs = (o.timeout || 30) * 1000;
+  const say = (s) => console.error("  " + s);
+  const src = path.resolve(absSrc);
+  const base = path.basename(src);
+
+  let text = null;
+  try { text = fs.readFileSync(b.snif, "utf8"); } catch (e) { fail("cannot read " + b.snif + ": " + e.message); }
+  const findings = memoryFindings(text, src, b.stage);
+  log(o, "analysed", path.basename(b.snif) + ":", findings.length, "finding(s)");
+
+  // The witness run. `--fin` is forced: without it the destroyer never runs and
+  // the question `--memory` asks is not even posed.
+  const pass = aowliArgs(b.snif, absSrc, o, false).filter((x) => !/^--trace/.test(x) && x !== "--fin");
+  const traced = capture(t.nifiInterp, ["--fin", "--trace", ...pass], timeoutMs);
+  const p = parseTrace(traced.err);
+  const ranFin = p.ops.length > 0 && !traced.spawnError;
+  if (traced.timedOut)
+    say(C.amber("!") + " " + C.gray("the --fin run hit the " + (o.timeout || 30) +
+      "s timeout; findings below are static only"));
+  if (p.truncatedTrace)
+    say(C.amber("!") + " " + C.gray("aowli truncated the trace at its 200k-line cap; " +
+      "witnesses past that point are unavailable"));
+
+  const marked = findings.map((f) => Object.assign({ w: ranFin && !traced.timedOut
+    ? witnessFinding(f, p.ops, base) : { destroyed: false, used: false, confirmed: false } }, f));
+  const confirmed = marked.filter((f) => f.w.confirmed);
+
+  const provenance = () =>
+    say("  " + C.dim("front end " + (b.byOurParser ? "aowlparser" : "nifler") + "→sem→" +
+      (o._usedAifhexer ? "aowlhexer" : "hexer") + " · witness " +
+      path.basename(t.nifiInterp) + " --fin " + stamp(t.nifiInterp) + " · " +
+      p.ops.length + " traced op" + (p.ops.length === 1 ? "" : "s")));
+
+  console.error("");
+  const st = findings.stats;
+  if (!marked.length) {
+    const nothingToCheck = st.sites === 0;
+    say((nothingToCheck ? C.amber(G.ok) : C.green(G.ok)) + " " +
+      C.bold((nothingToCheck ? C.amber : C.green)("verify --memory")) + " " + C.gray(G.bar) + " " +
+      C.gray(nothingToCheck ? "nothing to check — " + file + " takes no addresses"
+                            : "no pointer outlives the storage it names"));
+    // Say what was actually examined. "clean" and "the walk never reached your
+    // code" would otherwise print the same line.
+    say("  " + C.dim(st.sites + " address-taking site" + (st.sites === 1 ? "" : "s") + " · " +
+      st.tracked + " bound to a named pointer and tracked across " + st.scopes + " scope" +
+      (st.scopes === 1 ? "" : "s")));
+    if (st.sites > st.tracked) say("  " + C.gray("note: " + (st.sites - st.tracked) +
+      (st.sites - st.tracked === 1 ? " address flows" : " addresses flow") + " straight into a call rather than " +
+      "into a variable; this analysis is intraprocedural and does not follow them into the callee"));
+    if (!ranFin) say("  " + C.amber("!") + " " + C.gray("the --fin run produced no trace, so this is a " +
+      "static result only — nothing witnessed a destructor actually running"));
+    provenance();
+    console.error("");
+    process.exit(0);
+  }
+
+  const noun = (n) => n + " " + (n === 1 ? "defect" : "defects");
+  say(C.red(G.cross) + " " + C.bold(C.red("verify --memory")) + " " + C.gray(G.bar) + " " +
+    C.gray(noun(marked.length) + ", ") +
+    (confirmed.length ? C.red(confirmed.length + " confirmed under --fin")
+                      : C.amber("none reached on this run")));
+  console.error("");
+
+  for (const f of marked) {
+    const at = (pos) => file + ":" + pos.line + ":" + (pos.col + 1);
+    const esc = f.kind === "escape";
+    const who = esc ? (f.routine ? "`" + f.routine + "`" : "the routine") : null;
+    const title = esc
+      ? "the address of the local `" + f.target + "` outlives " + who
+      : "`" + f.ptr + "` is used after the storage it points at was destroyed";
+    say(C.bold(esc ? "escaping address" : "use after free") + "   " + C.gray(title));
+    say("  " + C.cyan("allocated ") + C.gray(G.arrow) + " " + at(f.alloc) +
+      C.dim("   `" + f.target + "` is declared here"));
+    if (esc) {
+      say("  " + C.red("escapes   ") + C.gray(G.arrow) + " " + at(f.use) +
+        C.dim("   its address is returned from " + who) +
+        (f.w.confirmed ? C.dim(" — " + f.routine + " ran on this run") : ""));
+      say("  " + C.violet("freed     ") + C.gray(G.arrow) + C.dim(" as " + who +
+        " returns — every caller's copy of the pointer is dangling from that moment"));
+    } else {
+      say("  " + C.violet("freed     ") + C.gray(G.arrow) + " " + file + ":" + f.free.line +
+        C.dim("   end of the scope opened at " + file + ":" + (f.opened ? f.opened.line : f.free.line)) +
+        (f.w.destroyed ? C.dim(" — =destroy witnessed here") : ""));
+      say("  " + C.red("used      ") + C.gray(G.arrow) + " " + at(f.use) +
+        (f.w.used ? C.dim("   executed on this run") : ""));
+    }
+    console.error("");
+    renderDiag({
+      severity: f.w.confirmed ? "error" : "warning", code: null, file,
+      line: f.use.line, col: f.use.col + 1, endCol: f.use.col + 1 + f.ptr.length,
+      message: title,
+      helps: [{ kind: "note", text:
+        !ranFin ? "static only: the --fin witness run produced no trace"
+        : esc ? (f.w.confirmed
+            ? "confirmed: " + who + " ran under --fin, so a dangling pointer really was handed out"
+            : who + " was not called on this run, so nothing witnessed the escape — the analysis is structural")
+        : f.w.confirmed
+          ? "confirmed: the --fin run destroyed `" + f.target + "` and then reached this line"
+        : f.w.destroyed ? "the destructor ran, but this line was not reached on this run — the " +
+            "defect is real, the path is not exercised by the program's default input"
+        : "this run neither destroyed `" + f.target + "` nor reached this line; the analysis is " +
+            "structural and the path was not taken" }],
+    }, src, file);
+    console.error("");
+  }
+  provenance();
+  console.error("");
+  process.exit(1);
+}
+
 function verifyCmd(b, file, absSrc, o, t) {
+  if (o.memory) return verifyMemoryCmd(b, file, absSrc, o, t);
   const timeoutMs = (o.timeout || 30) * 1000;
   const say = (s) => console.error("  " + s);
 
@@ -1050,6 +1456,7 @@ function main() {
       ["ts|js FILE [--faithful]", "emit idiomatic TypeScript / JavaScript"],
       ["py FILE", "emit idiomatic Python"],
       ["verify FILE", "run native + interpreted, report the first divergent op"],
+      ["verify FILE --memory", "trap dangling pointers under --fin: allocation site + use site"],
       ["parse FILE", "show OUR .p.nif"],
       ["nif FILE", "compile only; print .s/.c.nif paths"],
       ["fix FILE [--dry-run]", "apply aowlsuggest quick-fixes (cross-language habits)"],
@@ -1217,5 +1624,5 @@ if (require.main === module) {
   try { main(); } catch (e) { fail((e && e.stack) || String(e)); }
 } else {
   module.exports = { parseTrace, attribute, unescapeArg, firstDiff, offsetToLineCol, locateOp,
-                     newerBuildThan, repoBin };
+                     newerBuildThan, repoBin, nifParse, nifAtom, memoryFindings, witnessFinding };
 }

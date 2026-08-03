@@ -595,9 +595,24 @@ function compile(nimFile, o, t) {
   log(o, "nifparser parses", path.basename(abs) + ";",
     useAowlsem ? "sem via aowlsem (ours)" : "sem via nimony nimsem;",
     useAifhexer ? "lowering via aowlhexer (ours)" : "lowering via nimony hexer");
+  // Take the machine-wide lock. `nimony c` links against
+  // ~/nimony/nimcache_static/static.o whatever `--nimcache:` says, AND
+  // regenerates it — so two nimony processes anywhere on the box (another
+  // session, another repo, this driver's own test suite) race, and the loser
+  // dies with `ld: cannot find …/static.o`. That reads exactly like a real link
+  // error, which is how it gets misread as a compile failure. Per-invocation
+  // (seconds), not per-run — and it protects other builders from us as much as
+  // us from them, since this compile regenerates the shared object too.
+  const nimlock = path.join(HOME, ".aowl", "bin", "nimlock");
+  const locked = fs.existsSync(nimlock);
+  if (!locked) log(o, "nimlock not found — compiling unlocked; a concurrent nimony " +
+    "on this machine can fail the link with a missing static.o");
   const _t0 = process.hrtime.bigint();
-  const r = cp.spawnSync(t.nimony, ["c", "--nimcache:" + nc, abs],
-    { cwd: stage, env, encoding: "utf8" });
+  const r = locked
+    ? cp.spawnSync(nimlock, [t.nimony, "c", "--nimcache:" + nc, abs],
+        { cwd: stage, env, encoding: "utf8" })
+    : cp.spawnSync(t.nimony, ["c", "--nimcache:" + nc, abs],
+        { cwd: stage, env, encoding: "utf8" });
   const compileMs = Number(process.hrtime.bigint() - _t0) / 1e6;
   if (o.verbose && r.stderr) process.stderr.write(r.stderr);
 

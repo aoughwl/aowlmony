@@ -772,16 +772,20 @@ function parseTrace(text) {
     if (body[0] === "←") { stack.length = Math.min(stack.length, depth); continue; }
     if (body[0] !== "→") continue;
     let rest = body.slice(2);
-    let line = 0;
-    const m = rest.match(/ {2}:(\d+)$/);
-    if (m) { line = Number(m[1]); rest = rest.slice(0, rest.length - m[0].length); }
+    let line = 0, file = "";
+    // aowli ≥ the trace-file-attribution change renders `  <file>:<line>`; older
+    // builds render `  :<line>` with no file. Accept both — an unrecognised
+    // suffix would otherwise leave every op at line 0 and silently kill
+    // attribution rather than failing loudly.
+    const m = rest.match(/ {2}([^\s:()]*):(\d+)$/);
+    if (m) { file = m[1]; line = Number(m[2]); rest = rest.slice(0, rest.length - m[0].length); }
     const open = rest.indexOf("(");
     if (open < 0 || !rest.endsWith(")")) continue;
     stack.length = depth;
     const op = {
-      idx: ops.length, depth, line, callee: rest.slice(0, open),
+      idx: ops.length, depth, line, file, callee: rest.slice(0, open),
       argstr: rest.slice(open + 1, -1),
-      chain: stack.map((f) => ({ callee: f.callee, line: f.line })),
+      chain: stack.map((f) => ({ callee: f.callee, line: f.line, file: f.file })),
     };
     stack.push(op); ops.push(op);
     // `echo` lowers to `write(stdout, …)`; that argument IS the emitted text.
@@ -813,19 +817,25 @@ function attribute(writeOps, actual, off) {
   return { op: hit, exact };
 }
 
-// aowli's trace records a LINE but no FILE (src/aowli/trace.nim traceEnter takes
-// `line` only), so we attribute to the innermost frame whose line falls inside
-// the entry module — a stdlib frame (echo → write at system.nim:472) falls
-// outside it and we keep walking up the chain to the user's call site.
+// Attribute an op to a line of the entry module. When aowli's trace carries a
+// FILE (newer builds), a frame is user code iff that file is the entry module —
+// exact, no heuristic. Older builds record a line only, so we fall back to "the
+// innermost frame whose line falls inside the entry module": a stdlib frame
+// (echo → write at syncio.nim:472) usually falls outside it and we keep walking
+// up the chain to the user's call site. That fallback can misfire on a stdlib
+// line that happens to be in range, which is exactly why the file is preferred.
 function locateOp(op, absSrc, ops) {
   let lines;
   try { lines = fs.readFileSync(absSrc, "utf8").split(/\r?\n/); } catch (_) { return null; }
+  const base = path.basename(absSrc);
   const at = (line, how, callee) => {
     const text = lines[line - 1] || "";
     const col = Math.max(1, text.length - text.trimStart().length + 1);
     return { line, col, endCol: Math.max(col, text.trimEnd().length), callee, how };
   };
-  const inSrc = (f) => f.line > 0 && f.line <= lines.length;
+  const anyFile = [...op.chain, op].some((f) => f.file);
+  const inSrc = (f) => f.line > 0 && f.line <= lines.length &&
+    (anyFile ? f.file === base : true);
   // 1. the op itself, else the innermost enclosing frame that is user code.
   const frames = [...op.chain, op];
   for (let i = frames.length - 1; i >= 0; i--)
@@ -868,14 +878,14 @@ function reportDivergence(what, nat, int_, off, tr, absSrc, nimFile, ops) {
   if (!exact) console.error("  " + C.amber("!") + " " + C.gray("attribution is approximate: the rebuilt trace " +
     "stream does not match the run's stdout byte-for-byte (aowli truncates trace args at 48 chars)"));
   const chain = [...op.chain, op].filter((f) => f.line > 0)
-    .map((f) => f.callee + C.dim(":" + f.line));
+    .map((f) => f.callee + C.dim(":" + (f.file ? f.file + ":" : "") + f.line));
   if (chain.length) console.error("  " + C.bold("call chain") + "        " + chain.join(C.gray(" " + G.arrow + " ")));
   const loc = locateOp(op, absSrc, ops);
   console.error("");
   if (loc) {
     const NOTE = {
       caller: "innermost enclosing user frame — the divergent op itself (" + op.callee +
-        ") is inside the stdlib, which aowli's trace records by line only, with no file",
+        ") is outside " + nimFile + (op.file ? " (in " + op.file + ")" : ""),
       preceding: "the statement in progress: `" + op.callee + "` runs with no user frame above it " +
         "(a top-level echo expands to write(stdout,…) inside system), so this is the last op the " +
         "interpreter ran at a line in your module — `" + loc.callee + "`",
@@ -887,7 +897,7 @@ function reportDivergence(what, nat, int_, off, tr, absSrc, nimFile, ops) {
     }, path.resolve(absSrc), nimFile);
   } else {
     console.error("  " + C.amber("!") + " " + C.gray("no source location: every frame on this op's chain is " +
-      "outside " + nimFile + " (aowli's trace carries a line but no file, so stdlib frames cannot be resolved)"));
+      "outside " + nimFile + " — the whole stack ran in the standard library"));
   }
   console.error("");
 }

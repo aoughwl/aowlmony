@@ -156,6 +156,20 @@ console.log("verify (native ≡ interpreted):");
   check("unescapeArg restores a newline", JSON.stringify(V.unescapeArg("a\\nb").text), JSON.stringify("a\nb"));
   check("unescapeArg flags a 48-char truncated arg", V.unescapeArg("x".repeat(45) + "...").truncated, true);
   check("firstDiff on a prefix points past the shorter stream", V.firstDiff("ab", "abc"), 2);
+
+  // Both trace call-site spellings must parse. aowli used to render `  :<line>`
+  // with no file; it now renders `  <file>:<line>`. When the newer spelling did
+  // not parse, every op silently landed at line 0 and attribution reported "no
+  // source location" instead of failing — so pin both forms.
+  const withFile = V.parseTrace("→ main()  t.nim:26\n  → write(stdout, hi)  syncio.nim:472\n  ← nil\n← nil\n");
+  check("parseTrace reads the file:line call site", withFile.ops[0].file + ":" + withFile.ops[0].line, "t.nim:26");
+  check("parseTrace keeps the nested frame's own file", withFile.ops[1].file, "syncio.nim");
+  const noFile = V.parseTrace("→ main()  :26\n← nil\n");
+  check("parseTrace still reads the old file-less call site", noFile.ops[0].line, 26);
+  // with a file present, a stdlib frame is user code iff the file matches — the
+  // line-range guess is not consulted at all.
+  const loc = V.locateOp(withFile.ops[1], path.join(EX, "hello.nim"), withFile.ops);
+  check("locateOp rejects a stdlib frame by file, not by line range", loc, null);
 }
 
 // --- provenance: the user module is parsed by OUR nifparser ---------------

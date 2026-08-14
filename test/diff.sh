@@ -55,7 +55,7 @@ norm() {
 #   <unported>    : ts/js/py/verify still belong to the JS driver, and the Nimony
 #                   build says so with exit 3 rather than guessing
 #   help          : lists the new `why` command
-EXPECTED_DIFF=("help" "why FIX/hello.nim" "verify FIX/hello.nim")
+EXPECTED_DIFF=("help" "why FIX/hello.nim")
 
 CASES=(
   "help"
@@ -73,6 +73,8 @@ CASES=(
   "why FIX/hello.nim"
   "ts FIX/hello.nim"
   "verify FIX/hello.nim"
+  "verify FIX/hello.nim --native:aowlc"
+  "verify FIX/diverge.nim"
   "js FIX/hello.nim"
   "py FIX/hello.nim"
   "ts FIX/hello.nim --run"
@@ -93,6 +95,20 @@ for c in "${CASES[@]}"; do
 
   is_expected=0
   for e in "${EXPECTED_DIFF[@]}"; do [ "$c" = "$e" ] && is_expected=1; done
+
+  # A case can AGREE for the wrong reason. `verify … diverge.nim` must reach the
+  # divergence path (exit 1); if a leg could not run, both implementations print
+  # the same "nothing to compare against" and the case passes while asserting
+  # nothing about the thing it exists to test.
+  case "$c" in
+    *diverge*)
+      if [ "$ea" != "1" ]; then
+        fail=$((fail+1))
+        echo "FAIL '$c' did not reach the divergence path (oracle exit $ea, expected 1)"
+        echo "    a leg could not run, so this case proved nothing"
+        continue
+      fi ;;
+  esac
 
   if [ "$same" = 1 ]; then
     if [ "$is_expected" = 1 ]; then

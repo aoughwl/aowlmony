@@ -10,7 +10,7 @@
 
 import std/[syncio, strutils, envvars, cmdline, os, monotimes, json]
 import aowlkit/[subprocess, tty]
-import aowlmony/[tools, stage, build, diag, project, pkg]
+import aowlmony/[tools, stage, build, diag, project, pkg, verify]
 
 const Prog = "aowlmony"
 
@@ -61,6 +61,8 @@ type Opts = object
   run: bool
   keep: bool
   memory: bool
+  timeout: int
+  native: string
   showTime: bool
   verbose: bool
 
@@ -74,8 +76,8 @@ proc isAowliFlag(a: string): bool =
 proc parseOpts(argv: seq[string]): Opts =
   result = Opts(rest: @[], args: @[], aowli: @[], progArgs: @[], outFile: "",
                 entry: "", evalCode: "", hasEval: false, faithful: false,
-                run: false, keep: false, memory: false, showTime: true,
-                verbose: false)
+                run: false, keep: false, memory: false, timeout: 0, native: "",
+                showTime: true, verbose: false)
   var i = 0
   while i < argv.len:
     let a = argv[i]
@@ -100,6 +102,22 @@ proc parseOpts(argv: seq[string]): Opts =
       inc i
       if i < argv.len: result.args.add argv[i]
     elif a == "--memory": result.memory = true
+    elif a.startsWith("--timeout:"):
+      try:
+        result.timeout = parseInt(a[10 ..< a.len])
+      except:
+        result.timeout = 0
+    elif a == "--timeout":
+      inc i
+      if i < argv.len:
+        try:
+          result.timeout = parseInt(argv[i])
+        except:
+          result.timeout = 0
+    elif a.startsWith("--native:"): result.native = a[9 ..< a.len]
+    elif a == "--native":
+      inc i
+      if i < argv.len: result.native = argv[i]
     elif a == "--faithful": result.faithful = true
     elif a == "--run": result.run = true
     elif a == "--keep": result.keep = true
@@ -127,7 +145,7 @@ proc cmdHelp(t: Tools) =
     @["ts|js FILE [--faithful]", "emit idiomatic TypeScript / JavaScript"],
     @["py FILE", "emit idiomatic Python"],
     @["verify FILE", "run native + interpreted, report the first divergent op"],
-    @["verify FILE --memory", "trap dangling pointers under --fin: allocation site + use site"],
+    @["verify FILE --memory", "trap dangling pointers under --fin (JS driver only, for now)"],
     @["parse FILE", "show OUR .p.nif"],
     @["nif FILE", "compile only; print .s/.c.nif paths"],
     @["why FILE", "say which input changed, and what it forced to rebuild"],
@@ -411,6 +429,32 @@ proc reportFailure(b: BuildResult, nimFile, abs: string, t: Tools, verbose: bool
     stderr.writeLine gray("  [verbose] raw driver output:")
     stderr.write b.output
   suggestFixHints(nimFile, abs, t, shown)
+
+
+# --------------------------------------------------------------------------
+# verify's two footers
+# --------------------------------------------------------------------------
+
+proc provenance(which, bin, interpPath: string, byOurParser, usedHexer: bool) =
+  ## Which binaries produced this verdict. A verdict without its provenance is
+  ## unfalsifiable a week later.
+  stderr.writeLine "    " & dim("native " &
+    (if which == "aowlc": "aowlc→gcc" else: "nimony's C backend") & " " & dayOf(bin) &
+    " · interpreted " & baseNameOf(interpPath) & " " & dayOf(interpPath) &
+    " · front end " & (if byOurParser: "aowlparser" else: "nifler") & "→sem→" &
+    (if usedHexer: "aowlhexer" else: "hexer"))
+
+proc warnStale(stale: Newer, interpPath: string) =
+  ## Before blaming a backend, check the engine we ran is the newest one built.
+  if not stale.found: return
+  stderr.writeLine ""
+  stderr.writeLine "  " & amber("!") & " " &
+    bold(amber("this may not be a backend defect — the interpreter is not the newest build"))
+  stderr.writeLine "  " & gray("ran    ") & cyan(tildeAbbrev(interpPath))
+  stderr.writeLine "  " & gray("newer  ") & cyan(tildeAbbrev(stale.path))
+  stderr.writeLine "  " & gray("re-run with ") &
+    teal("AOWLMONY_NIFI=" & tildeAbbrev(stale.path)) &
+    gray(" before reporting this as an aowli bug")
 
 # --------------------------------------------------------------------------
 # main
@@ -775,9 +819,161 @@ proc main() =
       quit rc
     timingLine(cmd, b.compileMs, -1.0, o.showTime)
   of "verify":
-    # The differential harness is the largest single piece of the JS driver and
-    # is not ported yet; it still answers for this command.
-    fail("'" & cmd & "' is not in the nimony build yet — use the JS driver for it", 3)
+    if o.memory:
+      # A DIFFERENT question: a static dangling-pointer analysis over the NIF,
+      # witnessed against a --fin run. Not ported; the JS driver answers it.
+      fail("'verify --memory' is not in the nimony build yet — use the JS driver for it", 3)
+    let timeoutS = if o.timeout > 0: o.timeout else: 30
+    let which = if o.native.len > 0: o.native else: "nimony"
+    if which != "nimony" and which != "aowlc":
+      fail("--native takes nimony|aowlc, not '" & which & "'")
+
+    var bin = ""
+    var temp = false
+    if which == "nimony":
+      bin = b.nbin
+      if bin.len == 0:
+        stderr.writeLine ""
+        stderr.writeLine "  " & red(GCross) & " " & bold(red("verify")) & " " &
+          gray(GBar) & " " & gray("nimony linked no binary for this module — nothing to compare against")
+        stderr.writeLine "  " & gray("  try the self-owned backend instead: ") &
+          teal("aowlmony verify " & file & " --native:aowlc")
+        stderr.writeLine ""
+        quit 2
+    else:
+      # build first, then run — so a BUILD failure is never mistaken for the
+      # program writing to stderr (`aowlc run` merges the two).
+      bin = "/tmp/aowlmony-verify-bin-" & $ticks(getMonoTime())
+      temp = true
+      let nb = runCap("node", @[t.native, "build", b.cnif, "-o", bin], timeoutS)
+      if nb.code != 0 or not tools.fileExists(bin):
+        stderr.writeLine ""
+        stderr.writeLine "  " & red(GCross) & " " & bold(red("verify")) & " " &
+          gray(GBar) & " " & gray("the aowlc native leg did not build — nothing to compare against")
+        var shown = 0
+        for l in splitLines(nb.errText & "\n" & nb.outText):
+          if shown >= 4: break
+          if contains(l, "error") or contains(l, "Error"):
+            stderr.writeLine "  " & dim("    " & strip(l))
+            inc shown
+        stderr.writeLine "  " & gray("  the interpreted leg is unaffected — ") &
+          teal("aowlmony interp " & file) & gray(" runs it")
+        stderr.writeLine ""
+        quit 2
+
+    let nat = runCap(bin, o.progArgs, timeoutS)
+    let itp = runCap(t.interp, aowliArgs(b.snif, absSrc, o, false), timeoutS)
+    if temp: discard execShellCmd("rm -f " & quoteShell(bin))
+
+    for leg in [("native", nat), ("interpreted", itp)]:
+      if leg[1].timedOut:
+        stderr.writeLine ""
+        stderr.writeLine "  " & red(GCross) & " " & bold(red("verify")) & " " &
+          gray(GBar) & " the " & leg[0] & " leg hit the " & $timeoutS &
+          "s timeout (raise it with " & teal("--timeout:N") & ")"
+        stderr.writeLine "  " & gray("  the other leg finished, so this is itself a divergence: one realizer does not terminate")
+        stderr.writeLine ""
+        quit 1
+
+    let stale = newerBuildThan(t.interp, repoBin("nifi", "-interp"))
+
+    # stdout first (that is what programs are judged on), then stderr, then exit
+    # status. Only re-run under --trace when something actually differs.
+    for check in [("stdout", nat.outText, itp.outText),
+                  ("stderr", nat.errText, itp.errText)]:
+      let off = firstDiff(check[1], check[2])
+      if off < 0: continue
+      var traceArgs: seq[string] = @["--trace"]
+      for a in aowliArgs(b.snif, absSrc, o, false):
+        if not a.startsWith("--trace"): traceArgs.add a
+      let traced = runCap(t.interp, traceArgs, timeoutS)
+      let tr = parseTrace(traced.errText)
+      if tr.truncated:
+        stderr.writeLine "  " & amber("!") & " " &
+          gray("aowli truncated the trace at its cap; attribution past that point is unavailable")
+      let writes = if check[0] == "stdout": tr.stdoutWrites else: tr.stderrWrites
+      let att = attribute(tr, writes, check[2], off)
+
+      let lc = offsetToLineCol((if check[1].len > off: check[1] else: check[2]), off)
+      stderr.writeLine ""
+      stderr.writeLine "  " & red(GCross) & " " & bold(red("verify")) & " " &
+        gray(GBar) & " " & gray("native ") & red("≢") & gray(" interpreted")
+      stderr.writeLine ""
+      stderr.writeLine "  " & bold("first divergence") & gray("  in " & check[0] &
+        " at line " & $lc[0] & ", col " & $lc[1] & "  (byte " & $off & ")")
+      stderr.writeLine "    " & cyan("native      ") & gray(GArrow) & " " & around(check[1], off)
+      stderr.writeLine "    " & violet("interpreted ") & gray(GArrow) & " " & around(check[2], off)
+
+      if att[0] < 0:
+        stderr.writeLine ""
+        stderr.writeLine "  " & amber("!") & " " & gray("no traced write op covers that byte — " &
+          "the interpreted leg produced this output outside a recorded call")
+        stderr.writeLine ""
+      else:
+        let op = tr.ops[att[0]]
+        stderr.writeLine ""
+        stderr.writeLine "  " & bold("produced by") & "       " &
+          teal(op.callee & "(" & op.argstr & ")") &
+          dim("   op #" & $op.idx & " of the interpreted run")
+        if not att[1]:
+          stderr.writeLine "  " & amber("!") & " " & gray("attribution is approximate: the " &
+            "rebuilt trace stream does not match the run's output byte-for-byte " &
+            "(aowli truncates trace args at 48 chars)")
+        let loc = locateOp(tr, att[0], absSrc)
+        stderr.writeLine ""
+        if loc.ok:
+          var helps: seq[Help] = @[]
+          if loc.how == "caller":
+            helps.add Help(kind: "note", text: "innermost enclosing user frame — the " &
+              "divergent op itself (" & op.callee & ") is outside " & file)
+          elif loc.how == "preceding":
+            helps.add Help(kind: "note", text: "the statement in progress: `" & op.callee &
+              "` runs with no user frame above it (a top-level echo expands to " &
+              "write(stdout,…) inside system), so this is the last op the interpreter " &
+              "ran at a line in your module — `" & loc.callee & "`")
+          renderDiag(Diagnostic(file: file, line: loc.line, col: loc.col,
+            severity: "error", code: "",
+            message: "native and interpreted disagree here", helps: helps), absSrc, file)
+        else:
+          stderr.writeLine "  " & amber("!") & " " & gray("no source location: every frame " &
+            "on this op's chain is outside " & file & " — the whole stack ran in the standard library")
+      provenance(which, bin, t.interp, b.byOurParser, b.usedHexer)
+      warnStale(stale, t.interp)
+      stderr.writeLine ""
+      quit 1
+
+    if nat.code != itp.code:
+      stderr.writeLine ""
+      stderr.writeLine "  " & red(GCross) & " " & bold(red("verify")) & " " &
+        gray(GBar) & " " & gray("output agrees, ") & red("exit status does not")
+      stderr.writeLine "  " & cyan("native      ") & gray(GArrow) & " exit " & $nat.code
+      stderr.writeLine "  " & violet("interpreted ") & gray(GArrow) & " exit " & $itp.code
+      provenance(which, bin, t.interp, b.byOurParser, b.usedHexer)
+      warnStale(stale, t.interp)
+      stderr.writeLine ""
+      quit 1
+
+    # Agreed — say exactly what was compared, so a trivial "both printed nothing"
+    # never reads like a strong result.
+    var nLines = 0
+    if nat.outText.len > 0:
+      nLines = splitLines(nat.outText).len
+      if nat.outText.endsWith("\n"): dec nLines
+    stderr.writeLine ""
+    stderr.writeLine "  " & green(GOk) & " " & bold(green("verify")) & " " &
+      gray(GBar) & " " & gray("native ") & green("≡") & gray(" interpreted")
+    stderr.writeLine "    " & dim("stdout " & $nat.outText.len & "B / " & $nLines &
+      " line" & (if nLines == 1: "" else: "s") & " · stderr " & $nat.errText.len &
+      "B · exit " & $nat.code)
+    if nat.outText.len == 0 and nat.errText.len == 0:
+      stderr.writeLine "  " & amber("!") & " " &
+        gray("both legs produced no output — agreement here is weak evidence")
+    provenance(which, bin, t.interp, b.byOurParser, b.usedHexer)
+    if stale.found:
+      stderr.writeLine "  " & amber("!") & " " & gray("a newer interpreter exists (") &
+        cyan(tildeAbbrev(stale.path)) & gray(") — this agreement is about the older build")
+    stderr.writeLine ""
+    quit 0
   else:
     fail("unknown command '" & cmd & "'. Try `" & Prog & " help`.")
 

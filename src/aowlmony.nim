@@ -10,7 +10,7 @@
 
 import std/[syncio, strutils, envvars, cmdline, os, monotimes, json]
 import aowlkit/[subprocess, tty]
-import aowlmony/[tools, stage, build, diag]
+import aowlmony/[tools, stage, build, diag, project]
 
 const Prog = "aowlmony"
 
@@ -131,6 +131,10 @@ proc cmdHelp(t: Tools) =
     @["parse FILE", "show OUR .p.nif"],
     @["nif FILE", "compile only; print .s/.c.nif paths"],
     @["why FILE", "say which input changed, and what it forced to rebuild"],
+    @["new NAME | init", "start a project (mony.toml + src/)"],
+    @["test [ARGS]", "run the project's tests via aowltest"],
+    @["watch FILE", "rebuild whenever an input changes"],
+    @["clean [--all]", "drop build manifests (--all: the artifacts too)"],
     @["fix FILE [--dry-run]", "apply aowlsuggest quick-fixes (cross-language habits)"],
     @["lint FILE", "aowlsuggest diagnostics only (no compile)"],
   ]
@@ -192,6 +196,14 @@ proc outPath(nimFile, outOpt, ext: string): string =
 proc tildeAbbrev(p: string): string =
   let h = homeDir()
   if h.len > 0 and p.startsWith(h): "~" & p[h.len ..< p.len] else: p
+
+proc baseNameOf(p: string): string =
+  var cut = -1
+  var i = 0
+  while i < p.len:
+    if p[i] == '/': cut = i
+    inc i
+  if cut >= 0: p[cut + 1 ..< p.len] else: p
 
 proc aowliArgs(snif, absSrc: string, o: Opts, vmOnly: bool): seq[string] =
   var pass: seq[string] = @[]
@@ -412,15 +424,95 @@ proc main() =
     inc k
   let o = parseOpts(tail)
   let t = resolveTools()
+  let proj = findProject(getEnv("PWD", "."))
 
   if cmd.len == 0 or cmd == "-h" or cmd == "--help" or cmd == "help":
     cmdHelp(t)
     return
 
+  # A manifest entry that does nothing is worse than an error: say plainly which
+  # deps this driver cannot resolve yet, every build, rather than letting the
+  # program fail later with an import error that names no cause.
+  if proj.found:
+    let missing = unresolvedDeps(proj)
+    if missing.len > 0:
+      stderr.writeLine "  " & amber(GWarn) & " " & gray("mony.toml declares ") &
+        cyan(joinStr(missing, ", ")) &
+        gray(" as git/version deps — only path deps resolve today, so ") &
+        gray("these are NOT on the search path")
+
   if t.semVariant == "aowlsem" and not tools.fileExists(t.aowlsem):
     stderr.writeLine "  " & amber("!") & " " & gray("profile selects ") &
       cyan("sem=aowlsem") & gray(", but the aowlsem binary was not found " &
       "(build ~/aowlsem/bin/aowlsem or set AOWLMONY_AOWLSEM) — using nimony sem")
+
+  # ---- project-level commands, none of which need a compile ----------------
+  if cmd == "new" or cmd == "init":
+    var dir = ""
+    var name = ""
+    if cmd == "new":
+      if o.rest.len == 0: fail("new needs a project name")
+      name = o.rest[0]
+      dir = name
+      if project.dirExists(dir): fail("'" & dir & "' already exists")
+      discard execShellCmd("mkdir -p " & quoteShell(dir & "/src"))
+    else:
+      dir = "."
+      name = if o.rest.len > 0: o.rest[0] else: baseNameOf(getEnv("PWD", "app"))
+      discard execShellCmd("mkdir -p " & quoteShell(dir & "/src"))
+    let manifest = dir & "/mony.toml"
+    if tools.fileExists(manifest): fail("mony.toml already exists")
+    let entry = "src/" & name & ".nim"
+    try:
+      writeFile(manifest,
+        "[package]\n" &
+        "name    = \"" & name & "\"\n" &
+        "version = \"0.1.0\"\n\n" &
+        "[build]\n" &
+        "entry   = \"" & entry & "\"\n" &
+        "target  = \"native\"\n\n" &
+        "[deps]\n")
+      if not tools.fileExists(dir & "/" & entry):
+        writeFile(dir & "/" & entry,
+          "import std/syncio\n\nproc main() =\n  echo \"hello from " & name &
+          "\"\n\nmain()\n")
+    except:
+      fail("could not write the project files")
+    stdout.writeLine "  " & green(GOk) & " " & gray("created ") & cyan(name) &
+      dim("  " & manifest & " + " & entry)
+    stdout.writeLine "  " & dim("next → ") & teal("aowlmony run") &
+      dim("   (the entry comes from mony.toml)")
+    return
+
+  if cmd == "clean":
+    let st = stageDir(t)
+    stdout.writeLine "  " & gray("stage ") & cyan(tildeAbbrev(st))
+    if o.rest.len > 0 and o.rest[0] == "--all":
+      discard execShellCmd("rm -rf " & quoteShell(st))
+      stdout.writeLine "  " & green(GOk) & " removed the whole stage " &
+        dim("(the next build is cold)")
+    else:
+      discard execShellCmd("rm -rf " & quoteShell(st & "/manifests"))
+      stdout.writeLine "  " & green(GOk) & " dropped the build manifests " &
+        dim("(artifacts kept; --all removes those too)")
+    return
+
+  if cmd == "test":
+    # aowltest owns test running — hash-skipping unchanged cases is its whole
+    # design, and reimplementing a worse version here would be the wrong kind of
+    # self-reliance. We only locate it and hand over.
+    var runner = ""
+    for c in [homeDir() & "/aowltest/bin/aowltest", homeDir() & "/.aowl/bin/aowltest"]:
+      if tools.fileExists(c): runner = c
+    if runner.len == 0:
+      let onPath = runCaptured("bash", @["-lc", "command -v aowltest || true"], "", false)
+      if onPath.ok: runner = strip(onPath.output)
+    if runner.len == 0 or not tools.fileExists(runner):
+      fail("aowltest not found — install it, or run your tests directly")
+    var targs: seq[string] = @[]
+    for a in o.rest: targs.add a
+    if targs.len == 0 and proj.found: targs.add proj.root
+    quit runInherit(runner, targs)
 
   if cmd == "parse":
     if o.rest.len == 0: fail("parse needs a .nim file")
@@ -471,6 +563,11 @@ proc main() =
     elif file.len == 0:
       fail("eval needs a FILE, -e CODE, or -")
 
+  if file.len == 0 and proj.found and proj.entry.len > 0:
+    # `aowlmony run` inside a project needs no argument: the manifest names the
+    # entry, which is the whole point of having one.
+    file = proj.root & "/" & proj.entry
+    note(o.verbose, "entry from mony.toml: " & file)
   if file.len == 0: fail(cmd & " needs a .nim file")
   if not tools.fileExists(file): fail("no such file: " & file)
   if cmd == "verify": compileFailCode = 2
@@ -507,7 +604,28 @@ proc main() =
     stdout.writeLine "  " & dim("stage ") & dim(st)
     return
 
-  let b = build.build(file, t, o.verbose)
+  if cmd == "watch":
+    # Poll the manifest rather than the filesystem: the manifest is content, and
+    # the whole point of this driver's cache is that a timestamp is not evidence.
+    let st = stageDir(t)
+    stdout.writeLine "  " & gray("watching ") & cyan(tildeAbbrev(absSrc)) &
+      dim("   (ctrl-c to stop)")
+    var last = ""
+    while true:
+      let closure = userClosure(st & "/nc", st, "")
+      let now = buildManifest(absSrc, closure, t)
+      if now != last:
+        last = now
+        let wb = build.build(file, t, false, proj)
+        if wb.ok:
+          let rc = runInherit(t.interp, aowliArgs(wb.snif, absSrc, o, false))
+          discard rc
+          timingLine("watch", wb.compileMs, -1.0, o.showTime)
+        else:
+          reportFailure(wb, file, absSrc, t, false)
+      discard execShellCmd("sleep 0.5")
+
+  let b = build.build(file, t, o.verbose, proj)
   if not b.ok:
     reportFailure(b, file, absSrc, t, o.verbose)
     fail("compile failed", compileFailCode)

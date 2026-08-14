@@ -12,7 +12,7 @@
 
 import std/[syncio, strutils, envvars, os, monotimes]
 import aowlkit/[subprocess, tty]
-import tools, stage
+import tools, stage, project
 
 type BuildResult* = object
   stage*: string
@@ -161,7 +161,8 @@ proc findMain(nc, stage, absEntry: string): tuple[hash: string, cnif: string] =
     if absolutise(stage, src) == absEntry: return (d, c)
   ("", "")
 
-proc build*(entry: string, t: Tools, verbose = false): BuildResult =
+proc build*(entry: string, t: Tools, verbose = false,
+            proj = emptyProject()): BuildResult =
   result = BuildResult(stage: "", nc: "", mainHash: "", snif: "", cnif: "",
                        pnif: "", nbin: "", byOurParser: false, compileMs: 0.0,
                        output: "", ok: false, usedHexer: false, usedSem: false)
@@ -228,10 +229,22 @@ proc build*(entry: string, t: Tools, verbose = false): BuildResult =
   # regardless of --nimcache:, so two compiles anywhere on the box race and the
   # loser dies with a link error that reads exactly like a real one.
   let nimlock = homeDir() & "/.aowl/bin/nimlock"
-  var cmd = "cd " & quoteShell(st) & " && NIFRW_USER=" & quoteShell(abs) &
+
+  # Every user module goes through OUR parser, not just the entry. The shim has
+  # always read a colon-separated list here; the previous driver passed a single
+  # path, so in a multi-file program the imported modules were parsed by nifler
+  # while the provenance line still claimed our parser had run.
+  var userList = abs
+  for f in userSources(proj):
+    if f != abs: userList.add ":" & f
+
+  var cmd = "cd " & quoteShell(st) & " && NIFRW_USER=" & quoteShell(userList) &
     " PATH=" & quoteShell(st) & ":$PATH "
   if tools.fileExists(nimlock): cmd.add quoteShell(nimlock) & " "
-  cmd.add quoteShell(t.nimony) & " c --nimcache:" & quoteShell(nc) & " " & quoteShell(abs)
+  cmd.add quoteShell(t.nimony) & " c --nimcache:" & quoteShell(nc)
+  for sp in searchPaths(proj):
+    cmd.add " --path:" & quoteShell(sp)
+  cmd.add " " & quoteShell(abs)
 
   let t0 = getMonoTime()
   let r = captureShellMerged(cmd)

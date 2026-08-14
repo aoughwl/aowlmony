@@ -374,9 +374,24 @@ proc reportFailure(b: BuildResult, nimFile, abs: string, t: Tools, verbose: bool
     # the staged spelling first, then the absolute one
     let staged = relativeTo(b.stage, abs)
     if staged.len > 0: s = replaceAll(s, staged, nimFile)
+    if b.wrapFile.len > 0:
+      # the compiler saw the WRAPPER, which lives in the stage. Rewrite both its
+      # absolute and its stage-relative spelling, or every diagnostic points at a
+      # generated file the user never wrote.
+      s = replaceAll(s, b.wrapFile, nimFile)
+      let wrapRel = relativeTo(b.stage, b.wrapFile)
+      if wrapRel.len > 0: s = replaceAll(s, wrapRel, nimFile)
     lines.add replaceAll(s, abs, nimFile)
 
-  let diags = parseDiagnostics(lines)
+  var diags = parseDiagnostics(lines)
+  if b.lineShift != 0:
+    # a prelude wrapper added lines above the user's first one; report the
+    # numbers they can act on, not the ones the compiler saw
+    var i = 0
+    while i < diags.len:
+      diags[i].line = diags[i].line - b.lineShift
+      if diags[i].line < 1: diags[i].line = 1
+      inc i
   var shown: seq[string] = @[]
   if diags.len > 0:
     var first = true

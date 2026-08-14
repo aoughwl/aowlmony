@@ -28,6 +28,9 @@ type BuildResult* = object
   ok*: bool
   usedHexer*: bool
   usedSem*: bool
+  lineShift*: int      ## lines the prelude wrapper added above the user's first
+  userFile*: string    ## the file the user actually wrote, when a wrapper was used
+  wrapFile*: string    ## the generated wrapper, "" when none was needed
 
 proc shellQuoteJson(s: string): string =
   ## A bash double-quoted literal for embedding a path in a generated shim.
@@ -165,7 +168,8 @@ proc build*(entry: string, t: Tools, verbose = false,
             proj = emptyProject()): BuildResult =
   result = BuildResult(stage: "", nc: "", mainHash: "", snif: "", cnif: "",
                        pnif: "", nbin: "", byOurParser: false, compileMs: 0.0,
-                       output: "", ok: false, usedHexer: false, usedSem: false)
+                       output: "", ok: false, usedHexer: false, usedSem: false,
+                       lineShift: 0, userFile: "", wrapFile: "")
   var abs = entry
   try:
     abs = expandFilename(entry)
@@ -177,6 +181,51 @@ proc build*(entry: string, t: Tools, verbose = false,
   discard execShellCmd("mkdir -p " & quoteShell(nc))
   result.stage = st
   result.nc = nc
+  result.userFile = abs
+
+  # A PRELUDE is a module implicitly imported into the entry — what makes a
+  # `.aoughwl` file substrate source with no boilerplate. It is done by compiling
+  # a wrapper whose first line is the import, which shifts every diagnostic by
+  # one line; the reporter shifts them back. The wrapper lives in the stage (so
+  # its module identity is stable) and the ORIGINAL directory goes on the search
+  # path so the user's own relative imports still resolve.
+  var compileTarget = abs
+  var extraPaths: seq[string] = @[]
+  if proj.prelude.len > 0:
+    let wrapDir = st & "/wrap/" & sha1Hex(abs)[0 ..< 12]
+    discard execShellCmd("mkdir -p " & quoteShell(wrapDir))
+    var srcText = ""
+    try:
+      srcText = readFile(abs)
+    except:
+      srcText = ""
+    var stemName = abs
+    var sc = -1
+    var si = 0
+    while si < stemName.len:
+      if stemName[si] == '/': sc = si
+      inc si
+    if sc >= 0: stemName = stemName[sc + 1 ..< stemName.len]
+    var dot = -1
+    si = 0
+    while si < stemName.len:
+      if stemName[si] == '.': dot = si
+      inc si
+    if dot > 0: stemName = stemName[0 ..< dot]
+    let wrapFile = wrapDir & "/" & stemName & ".nim"
+    try:
+      # no leading newline: user line N is wrapper line N+1, exactly one shift
+      writeFile(wrapFile, "import " & proj.prelude & "\n" & srcText)
+    except:
+      discard
+    compileTarget = wrapFile
+    result.wrapFile = wrapFile
+    result.lineShift = 1
+    var origDir = abs
+    if sc >= 0: origDir = abs[0 ..< sc]
+    extraPaths.add origDir
+    let subs = substratePaths()   # bind first: a returned seq is not borrowable
+    for sp in subs: extraPaths.add sp
 
   # Shims are rewritten every invocation, and a shim for a DESELECTED variant is
   # removed — a stale one lingering in a shared stage would silently keep using
@@ -234,9 +283,10 @@ proc build*(entry: string, t: Tools, verbose = false,
   # always read a colon-separated list here; the previous driver passed a single
   # path, so in a multi-file program the imported modules were parsed by nifler
   # while the provenance line still claimed our parser had run.
-  var userList = abs
+  var userList = compileTarget
+  if compileTarget != abs: userList.add ":" & abs
   for f in userSources(proj):
-    if f != abs: userList.add ":" & f
+    if f != abs and f != compileTarget: userList.add ":" & f
 
   var cmd = "cd " & quoteShell(st) & " && NIFRW_USER=" & quoteShell(userList) &
     " PATH=" & quoteShell(st) & ":$PATH "
@@ -244,14 +294,16 @@ proc build*(entry: string, t: Tools, verbose = false,
   cmd.add quoteShell(t.nimony) & " c --nimcache:" & quoteShell(nc)
   for sp in searchPaths(proj):
     cmd.add " --path:" & quoteShell(sp)
-  cmd.add " " & quoteShell(abs)
+  for sp in extraPaths:
+    cmd.add " --path:" & quoteShell(sp)
+  cmd.add " " & quoteShell(compileTarget)
 
   let t0 = getMonoTime()
   let r = captureShellMerged(cmd)
   result.compileMs = float(ticks(getMonoTime()) - ticks(t0)) / 1e6
   result.output = r.output
 
-  let m = findMain(nc, st, abs)
+  let m = findMain(nc, st, compileTarget)
   result.mainHash = m.hash
   result.cnif = m.cnif
 
@@ -279,7 +331,7 @@ proc build*(entry: string, t: Tools, verbose = false,
   # `nimony c` also links a binary next to the module's .c.nif, named after the
   # source stem. We already paid for that compile, and unlike our own native
   # backend today it handles stdout — so `verify` can use it as a native leg.
-  var stem = abs
+  var stem = compileTarget
   var slash = -1
   var i = 0
   while i < stem.len:

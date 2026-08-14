@@ -17,7 +17,7 @@
 ## content-addressed store, which are a later stage — and a manifest that
 ## silently ignored them would be worse than one that says so out loud.
 
-import std/[syncio, strutils]
+import std/[syncio, strutils, envvars]
 import aowlkit/subprocess
 
 type
@@ -35,11 +35,12 @@ type
     version*: string
     entry*: string     ## "" when unset
     target*: string
+    prelude*: string   ## a module implicitly imported into the entry, e.g. "aoughwl"
     deps*: seq[Dep]
 
 proc emptyProject*(): Project =
   Project(found: false, root: "", name: "", version: "", entry: "",
-          target: "", deps: @[])
+          target: "", prelude: "", deps: @[])
 
 proc fileExists(p: string): bool =
   var f: File
@@ -97,6 +98,7 @@ proc parseManifest*(path: string): Project =
     of "build":
       if key == "entry": result.entry = unquote(valRaw)
       elif key == "target": result.target = unquote(valRaw)
+      elif key == "prelude": result.prelude = unquote(valRaw)
     of "deps":
       var d = Dep(name: key, path: "", git: "", version: "", resolvable: false)
       if valRaw.len > 0 and valRaw[0] == '{':
@@ -188,3 +190,20 @@ proc unresolvedDeps*(p: Project): seq[string] =
   result = @[]
   for d in p.deps:
     if not d.resolvable: result.add d.name
+
+proc substratePaths*(): seq[string] =
+  ## Where the substrate's own modules live. The aoughwl driver hard-coded this
+  ## list; it belongs with the prelude that needs it.
+  ##
+  ## ⚠️ nimony does NOT read an adjacent nim.cfg, so these must be passed as
+  ## --path on the command line — an editor-only cfg file looks like it works
+  ## and does nothing here.
+  result = @[]
+  var home = getEnv("AOUGHWL_HOME", "")
+  if home.len == 0: home = getEnv("HOME", "") & "/aoughwl"
+  for sub in ["aifcas", "aowl", "reify", "std", "nifrewrite", "prim"]:
+    let d = home & "/" & sub
+    if dirExists(d): result.add d
+  var hl = getEnv("AOWLHL_HOME", "")
+  if hl.len == 0: hl = getEnv("HOME", "") & "/aowlhl"
+  if dirExists(hl & "/src"): result.add hl & "/src"

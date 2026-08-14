@@ -165,7 +165,7 @@ proc findMain(nc, stage, absEntry: string): tuple[hash: string, cnif: string] =
   ("", "")
 
 proc build*(entry: string, t: Tools, verbose = false,
-            proj = emptyProject()): BuildResult =
+            proj = emptyProject(), depPaths: seq[string] = @[]): BuildResult =
   result = BuildResult(stage: "", nc: "", mainHash: "", snif: "", cnif: "",
                        pnif: "", nbin: "", byOurParser: false, compileMs: 0.0,
                        output: "", ok: false, usedHexer: false, usedSem: false,
@@ -295,6 +295,8 @@ proc build*(entry: string, t: Tools, verbose = false,
   for sp in searchPaths(proj):
     cmd.add " --path:" & quoteShell(sp)
   for sp in extraPaths:
+    cmd.add " --path:" & quoteShell(sp)
+  for sp in depPaths:
     cmd.add " --path:" & quoteShell(sp)
   cmd.add " " & quoteShell(compileTarget)
 

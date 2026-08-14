@@ -10,7 +10,7 @@
 
 import std/[syncio, strutils, envvars, cmdline, os, monotimes, json]
 import aowlkit/[subprocess, tty]
-import aowlmony/[tools, stage, build, diag, project]
+import aowlmony/[tools, stage, build, diag, project, pkg]
 
 const Prog = "aowlmony"
 
@@ -132,6 +132,7 @@ proc cmdHelp(t: Tools) =
     @["nif FILE", "compile only; print .s/.c.nif paths"],
     @["why FILE", "say which input changed, and what it forced to rebuild"],
     @["new NAME | init", "start a project (mony.toml + src/)"],
+    @["fetch", "resolve deps into the store and write mony.lock"],
     @["test [ARGS]", "run the project's tests via aowltest"],
     @["watch FILE", "rebuild whenever an input changes"],
     @["clean [--all]", "drop build manifests (--all: the artifacts too)"],
@@ -445,16 +446,21 @@ proc main() =
     cmdHelp(t)
     return
 
-  # A manifest entry that does nothing is worse than an error: say plainly which
-  # deps this driver cannot resolve yet, every build, rather than letting the
-  # program fail later with an import error that names no cause.
-  if proj.found:
-    let missing = unresolvedDeps(proj)
-    if missing.len > 0:
-      stderr.writeLine "  " & amber(GWarn) & " " & gray("mony.toml declares ") &
-        cyan(joinStr(missing, ", ")) &
-        gray(" as git/version deps — only path deps resolve today, so ") &
-        gray("these are NOT on the search path")
+  # Resolve dependencies before anything is compiled, record what was resolved,
+  # and say plainly what could not be. A manifest entry that silently does
+  # nothing is worse than an error: the build fails later with an import error
+  # that names no cause.
+  var depPaths: seq[string] = @[]
+  if proj.found and proj.deps.len > 0:
+    let resolved = resolveDeps(proj)
+    for d in resolved:
+      if d.ok:
+        note(o.verbose, "dep " & d.name & " → " & d.dir)
+      else:
+        stderr.writeLine "  " & amber(GWarn) & " " & gray("dep ") & cyan(d.name) &
+          gray(" unresolved: ") & gray(d.err)
+    depPaths = depSearchPaths(resolved)
+    writeLock(proj, resolved)
 
   if t.semVariant == "aowlsem" and not tools.fileExists(t.aowlsem):
     stderr.writeLine "  " & amber("!") & " " & gray("profile selects ") &
@@ -510,6 +516,32 @@ proc main() =
       discard execShellCmd("rm -rf " & quoteShell(st & "/manifests"))
       stdout.writeLine "  " & green(GOk) & " dropped the build manifests " &
         dim("(artifacts kept; --all removes those too)")
+    return
+
+  if cmd == "fetch":
+    if not proj.found: fail("fetch needs a project — run `" & Prog & " init` first")
+    if proj.deps.len == 0:
+      note(true, "no dependencies declared in mony.toml")
+      return
+    stdout.write banner(Prog, "resolving dependencies")
+    let resolved = resolveDeps(proj)
+    var rows: seq[seq[string]] = @[]
+    var bad = 0
+    for d in resolved:
+      if d.ok:
+        rows.add @[bold(white(d.name)), dim(d.source),
+                   (if d.rev.len >= 8: cyan(d.rev[0 ..< 8]) else: dim("-")),
+                   green(GOk & " " & tildeAbbrev(d.dir))]
+      else:
+        rows.add @[bold(white(d.name)), dim(d.source), dim("-"), red(GCross & " " & d.err)]
+        inc bad
+    stdout.writeLine renderTable(@[column("dep"), column("source"),
+                                   column("rev"), column("resolved")], rows)
+    writeLock(proj, resolved)
+    stdout.writeLine ""
+    stdout.writeLine "  " & gray("lockfile ") & cyan(tildeAbbrev(lockPath(proj)))
+    stdout.writeLine ""
+    if bad > 0: quit 1
     return
 
   if cmd == "test":
@@ -631,7 +663,7 @@ proc main() =
       let now = buildManifest(absSrc, closure, t)
       if now != last:
         last = now
-        let wb = build.build(file, t, false, proj)
+        let wb = build.build(file, t, false, proj, depPaths)
         if wb.ok:
           let rc = runInherit(t.interp, aowliArgs(wb.snif, absSrc, o, false))
           discard rc
@@ -640,7 +672,7 @@ proc main() =
           reportFailure(wb, file, absSrc, t, false)
       discard execShellCmd("sleep 0.5")
 
-  let b = build.build(file, t, o.verbose, proj)
+  let b = build.build(file, t, o.verbose, proj, depPaths)
   if not b.ok:
     reportFailure(b, file, absSrc, t, o.verbose)
     fail("compile failed", compileFailCode)

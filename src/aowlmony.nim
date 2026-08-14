@@ -8,9 +8,9 @@
 ## Two tools, modelled on `rustup` : `cargo` — **aowlup** manages the toolchain
 ## and writes the registry; **aowlmony** compiles code and only ever reads it.
 
-import std/[syncio, strutils, envvars, cmdline, os, monotimes]
+import std/[syncio, strutils, envvars, cmdline, os, monotimes, json]
 import aowlkit/[subprocess, tty]
-import aowlmony/[tools, stage, build]
+import aowlmony/[tools, stage, build, diag]
 
 const Prog = "aowlmony"
 
@@ -162,6 +162,37 @@ proc runInherit(cmd: string, args: seq[string]): int =
   for a in args: line.add " " & quoteShell(a)
   execShellCmd(line)
 
+proc outPath(nimFile, outOpt, ext: string): string =
+  ## -o if given, else beside the .nim source.
+  if outOpt.len > 0:
+    try:
+      return expandFilename(outOpt)
+    except:
+      return outOpt
+  var abs = nimFile
+  try:
+    abs = expandFilename(nimFile)
+  except:
+    discard
+  var cut = -1
+  var i = 0
+  while i < abs.len:
+    if abs[i] == '/': cut = i
+    inc i
+  let dir = if cut >= 0: abs[0 ..< cut] else: "."
+  var stem = if cut >= 0: abs[cut + 1 ..< abs.len] else: abs
+  var dot = -1
+  i = 0
+  while i < stem.len:
+    if stem[i] == '.': dot = i
+    inc i
+  if dot > 0: stem = stem[0 ..< dot]
+  dir & "/" & stem & "." & ext
+
+proc tildeAbbrev(p: string): string =
+  let h = homeDir()
+  if h.len > 0 and p.startsWith(h): "~" & p[h.len ..< p.len] else: p
+
 proc aowliArgs(snif, absSrc: string, o: Opts, vmOnly: bool): seq[string] =
   var pass: seq[string] = @[]
   if vmOnly:
@@ -183,6 +214,175 @@ proc aowliArgs(snif, absSrc: string, o: Opts, vmOnly: bool): seq[string] =
   if o.progArgs.len > 0:
     result.add "--"
     for a in o.progArgs: result.add a
+
+# --------------------------------------------------------------------------
+# reporting a compile failure
+# --------------------------------------------------------------------------
+
+proc isNoise(s, stageDir: string): bool =
+  ## nifmake's driver chatter means nothing to someone who wrote a typo.
+  if s.startsWith("FAILURE:") or strip(s).startsWith("FAILURE:"): return true
+  if contains(s, "nifmake") or contains(s, ".build.nif") or
+     contains(s, ".deps.nif"): return true
+  if stageDir.len > 0 and contains(s, stageDir): return true
+  let t = strip(s)
+  if t.startsWith("✗") or t.startsWith("×"): return true
+  false
+
+proc splitPath(p: string): seq[string] =
+  result = @[]
+  for seg in split(p, '/'):
+    if seg.len > 0 and seg != ".": result.add seg
+
+proc relativeTo(base, target: string): string =
+  ## How the COMPILER spells the source: relative to its cwd, which is the stage
+  ## dir. Diagnostics arrive with that spelling, and it must be rewritten back to
+  ## the path the user typed or every error points at a directory they have never
+  ## heard of.
+  let b = splitPath(base)
+  let t = splitPath(target)
+  var i = 0
+  while i < b.len and i < t.len and b[i] == t[i]: inc i
+  var parts: seq[string] = @[]
+  var k = i
+  while k < b.len:
+    parts.add ".."
+    inc k
+  k = i
+  while k < t.len:
+    parts.add t[k]
+    inc k
+  joinStr(parts, "/")
+
+proc replaceAll(s, sub, by: string): string =
+  if sub.len == 0: return s
+  result = ""
+  var i = 0
+  while i < s.len:
+    if i + sub.len <= s.len and s[i ..< i + sub.len] == sub:
+      result.add by
+      i = i + sub.len
+    else:
+      result.add s[i]
+      inc i
+
+type Sug = object
+  line: int
+  col: int
+  code: string
+  message: string
+  fix: string
+
+proc absorbSug(node: JsonNode, found: var seq[Sug], anyFixable: var bool) =
+  ## Module level, not nested: capturing `found`/`anyFixable` from an inner proc
+  ## needs an explicit `.closure` in nimony, and var params say the same thing
+  ## more plainly.
+  var s = Sug(line: 0, col: 0, code: "", message: "", fix: "")
+  for k, v in pairs(node):
+    case k
+    of "line": s.line = int(getInt(v, 0))
+    of "col": s.col = int(getInt(v, 0))
+    of "code": s.code = getStr(v, "")
+    of "message": s.message = getStr(v, "")
+    of "fix": s.fix = getStr(v, "")
+    of "autofixable":
+      if getBool(v, false): anyFixable = true
+    else: discard
+  if s.fix.len > 0: anyFixable = true
+  found.add s
+
+proc suggestFixHints(nimFile, abs: string, t: Tools, shown: seq[string]) =
+  ## Many cryptic sem errors are a habit from another language. Ask aowlsuggest
+  ## whether it recognises one, and print the command that applies the fix.
+  ## Best effort: silent when the tool is absent or has nothing to say, and it
+  ## never displaces the primary error.
+  if t.aowlsuggest.len == 0 or not tools.fileExists(t.aowlsuggest): return
+  let r = runCaptured(t.aowlsuggest, @["check", abs, "--format:json"], "", false)
+  if not r.ok or strip(r.output).len == 0: return
+  var tree: JsonTree
+  try:
+    tree = parseJson(r.output)
+  except:
+    return
+  if hasError(tree): return
+
+  var found: seq[Sug] = @[]
+  var anyFixable = false
+
+  let rt = root(tree)
+  case kind(rt)
+  of JArray:
+    for item in items(rt): absorbSug(item, found, anyFixable)
+  else:
+    for k, v in pairs(rt):
+      if k == "files":
+        for f in items(v):
+          for fk, fv in pairs(f):
+            if fk == "diagnostics":
+              for d in items(fv): absorbSug(d, found, anyFixable)
+
+  var fresh: seq[Sug] = @[]
+  for s in found:
+    var dup = false
+    for key in shown:
+      if key == s.code & "@" & $s.line: dup = true
+    if not dup: fresh.add s
+  if fresh.len > 0:
+    stderr.writeLine ""
+    stderr.writeLine "  " & cyan("aowlsuggest") &
+      gray(" recognizes this — likely a cross-language habit:")
+    var n = 0
+    for s in fresh:
+      if n >= 6: break
+      var at = ""
+      if s.line > 0:
+        at = ":" & $s.line
+        if s.col > 0: at.add ":" & $s.col
+      var tip = ""
+      if s.fix.len > 0: tip = gray("  → " & s.fix)
+      let body = if s.message.len > 0: s.message else: s.code
+      stderr.writeLine "    " & amber("•") & " " & gray(nimFile & at) & "  " & body & tip
+      inc n
+    if fresh.len > 6:
+      stderr.writeLine "    " & gray("… " & $(fresh.len - 6) & " more (aowlsuggest lint " &
+        nimFile & ")")
+  if anyFixable:
+    stderr.writeLine "  " & gray("apply the auto-fixes: ") & cyan("aowlmony fix " & nimFile)
+
+proc reportFailure(b: BuildResult, nimFile, abs: string, t: Tools, verbose: bool) =
+  ## Show the COMPILER's diagnostics, with the staged `../../…` spelling rewritten
+  ## back to the path the user actually typed, and the build-driver noise dropped.
+  var lines: seq[string] = @[]
+  for raw in splitLines(b.output):
+    var s = raw
+    while s.len > 0 and (s[s.len - 1] == ' ' or s[s.len - 1] == '\t'):
+      s = s[0 ..< s.len - 1]
+    if strip(s).len == 0: continue
+    if isNoise(s, b.stage): continue
+    # the staged spelling first, then the absolute one
+    let staged = relativeTo(b.stage, abs)
+    if staged.len > 0: s = replaceAll(s, staged, nimFile)
+    lines.add replaceAll(s, abs, nimFile)
+
+  let diags = parseDiagnostics(lines)
+  var shown: seq[string] = @[]
+  if diags.len > 0:
+    var first = true
+    for d in diags:
+      if not first: stderr.writeLine ""
+      first = false
+      renderDiag(d, abs, nimFile)
+      shown.add d.code & "@" & $d.line
+  else:
+    var errs: seq[string] = @[]
+    for s in lines:
+      if contains(s, "Error:"): errs.add s
+    let show = if errs.len > 0: errs else: lines
+    for s in show: stderr.writeLine "  " & red(s)
+  if verbose and b.output.len > 0:
+    stderr.writeLine gray("  [verbose] raw driver output:")
+    stderr.write b.output
+  suggestFixHints(nimFile, abs, t, shown)
 
 # --------------------------------------------------------------------------
 # main
@@ -309,7 +509,7 @@ proc main() =
 
   let b = build.build(file, t, o.verbose)
   if not b.ok:
-    if b.output.len > 0: stderr.write b.output
+    reportFailure(b, file, absSrc, t, o.verbose)
     fail("compile failed", compileFailCode)
   note(o.verbose, "main module " & b.mainHash & " parsed by " &
        (if b.byOurParser: "nifparser (ours)" else: "nifler (fallback)"))
@@ -359,9 +559,59 @@ proc main() =
     let ms = float(ticks(getMonoTime()) - ticks(t0)) / 1e6
     if rc == 0: timingLine(cmd, b.compileMs, ms, o.showTime)
     quit rc
-  of "ts", "js", "py", "verify":
-    # Known commands the nimony build does not implement yet. The JS driver is
-    # still the one that answers for them, and saying so beats a wrong answer.
+  of "ts", "js", "py":
+    let bin = case cmd
+              of "ts": t.ts
+              of "js": t.js
+              else: t.py
+    if bin.len == 0 or not tools.fileExists(bin):
+      fail(cmd & " backend not found (set AOWLMONY_AOWL" & toUpperAscii(cmd) &
+           " or build ~/aowl" & cmd & "/bin/aowl" & cmd & ")")
+    let outFile = outPath(file, o.outFile, cmd)
+    let faithful = o.faithful and cmd != "py"   # int64-exact emission: ts/js only
+    var a: seq[string] = @[]
+    if faithful: a.add "--faithful"
+    a.add b.snif
+    note(o.verbose, cmd & " backend emits " & outFile &
+         (if faithful: " (faithful)" else: ""))
+    let er = runCaptured(bin, a, "", false)
+    if not er.ok or er.exitCode != 0:
+      if er.output.len > 0: stderr.write er.output
+      fail(cmd & " backend failed")
+    try:
+      writeFile(outFile, er.output)
+    except:
+      fail("could not write " & outFile)
+    stderr.writeLine "  " & green(GOk) & " " & gray("wrote ") &
+      cyan(tildeAbbrev(outFile))
+    if o.run:
+      let t0 = getMonoTime()
+      var rc = 0
+      case cmd
+      of "ts":
+        # --no-warnings: the transform-types flag is experimental and its notice
+        # would otherwise land in the program's own output.
+        rc = runInherit("node", @["--experimental-transform-types", "--no-warnings", outFile])
+      of "py":
+        rc = runInherit("python3", @[outFile])
+      else:
+        # aowljs's flush emits a top-level `return __out;`, so the module is
+        # wrapped in an IIFE and its return value printed — the same thing
+        # aowljs's own run harness does.
+        var src = ""
+        try:
+          src = readFile(outFile)
+        except:
+          src = ""
+        rc = runInherit("node", @["-e",
+          "process.stdout.write((function(){" & src & "})())"])
+      let ms = float(ticks(getMonoTime()) - ticks(t0)) / 1e6
+      if rc == 0: timingLine(cmd, b.compileMs, ms, o.showTime)
+      quit rc
+    timingLine(cmd, b.compileMs, -1.0, o.showTime)
+  of "verify":
+    # The differential harness is the largest single piece of the JS driver and
+    # is not ported yet; it still answers for this command.
     fail("'" & cmd & "' is not in the nimony build yet — use the JS driver for it", 3)
   else:
     fail("unknown command '" & cmd & "'. Try `" & Prog & " help`.")

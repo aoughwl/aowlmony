@@ -55,7 +55,7 @@ norm() {
 #   <unported>    : ts/js/py/verify still belong to the JS driver, and the Nimony
 #                   build says so with exit 3 rather than guessing
 #   help          : lists the new `why` command
-EXPECTED_DIFF=("help" "why FIX/hello.nim" "ts FIX/hello.nim" "verify FIX/hello.nim")
+EXPECTED_DIFF=("help" "why FIX/hello.nim" "verify FIX/hello.nim")
 
 CASES=(
   "help"
@@ -68,9 +68,14 @@ CASES=(
   "nif"
   "nosuchcommand FIX/hello.nim"
   "exec FIX/hello.nim"
+  "nif FIX/broken.nim"
+  "interp FIX/broken.nim"
   "why FIX/hello.nim"
   "ts FIX/hello.nim"
   "verify FIX/hello.nim"
+  "js FIX/hello.nim"
+  "py FIX/hello.nim"
+  "ts FIX/hello.nim --run"
 )
 
 pass=0; fail=0; expected=0

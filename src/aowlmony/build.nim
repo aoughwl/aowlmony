@@ -73,11 +73,27 @@ else
 fi
 """
 
-proc semShim(t: Tools, libDir: string): string =
+proc semShim(t: Tools, libDir, srcLibDir, stageDir: string): string =
   ## nimsem-compatible. nimony calls:
   ##   nimsem --base:B --nimcache:NC m [--isSystem|--isMain] <p.nif>…
   ## aowlsem wants:
-  ##   m <in.p.nif> <out.s.nif> [--base:] [--nimcache:] -p:LIB [--noSystem]
+  ##   m <in.p.nif> <out.s.nif> [--base:] [--nimcache:] -p:LIB… [--noSystem]
+  ##
+  ## THREE CLI INCOMPATIBILITIES, all of which have to be closed here:
+  ##
+  ##  * `--base:` MEANS DIFFERENT THINGS. nimony passes the project/config base
+  ##    dir; aowlsem uses it as the directory a module's RELATIVE line-info
+  ##    source path resolves against — which is the cwd the compile was launched
+  ##    from, i.e. our stage. Forwarding nimony's value makes system.nim's
+  ##    `include`s resolve to the wrong place and produces a flood of bogus
+  ##    `undeclared identifier \`string\`` / \`cint\`, which reads as aowlsem
+  ##    being nowhere near ready when the argv is simply wrong.
+  ##  * `--path:` is NOT OPTIONAL for aowlsem. nimsem derives the stdlib search
+  ##    path from getAppDir() and is never passed one; aowlsem needs it to derive
+  ##    the relative path nimony hashed each include fragment under. BOTH
+  ##    `<toolroot>/lib` and `<toolroot>/src/lib` are required.
+  ##  * argv SHAPE: aowlsem is positional (`m IN OUT`) and reads flags after it.
+  ##
   ## Anything that is not a single-module `m` goes to the real nimsem verbatim:
   ## cyclic module GROUPS (>1 file in one call) are not handled by aowlsem yet.
   ## The real nimsem is also reused as the mechanical .s.nif → .s.idx.nif
@@ -86,6 +102,8 @@ proc semShim(t: Tools, libDir: string): string =
   "AOWLSEM=" & shellQuoteJson(t.aowlsem) & "\n" &
   "NIMSEM=" & shellQuoteJson(t.nimsemReal) & "\n" &
   "LIB=" & shellQuoteJson(libDir) & "\n" &
+  "SRCLIB=" & shellQuoteJson(srcLibDir) & "\n" &
+  "STAGE=" & shellQuoteJson(stageDir) & "\n" &
   """mode=""; base=""; nc=""; issystem=0; seen_cmd=0; files=()
 for a in "$@"; do
   if [ "$seen_cmd" = 0 ]; then
@@ -110,9 +128,11 @@ fi
 in="${files[0]}"
 out="${in%.p.nif}.s.nif"
 sargs=(m "$in" "$out")
-[ -n "$base" ] && sargs+=("$base")
+# nimony's --base is DROPPED on purpose (see the note above); aowlsem's --base
+# is the directory relative line-info resolves against, which is our stage.
+sargs+=("--base:$STAGE")
 [ -n "$nc" ] && sargs+=("$nc")
-sargs+=("-p:$LIB")
+sargs+=("-p:$LIB" "-p:$SRCLIB")
 [ "$issystem" = 1 ] && sargs+=("--noSystem")
 "$AOWLSEM" "${sargs[@]}" || exit $?
 exec "$NIMSEM" x "$out"
@@ -128,6 +148,20 @@ proc writeShim(path, body: string) =
 proc removeIfPresent(path: string) =
   if tools.fileExists(path):
     discard execShellCmd("rm -f " & quoteShell(path))
+
+proc repoRootOf(nimony: string): string =
+  ## <nimony repo>, from <repo>/bin/nimony
+  var cuts = 0
+  var i = nimony.len - 1
+  var cut = -1
+  while i >= 0:
+    if nimony[i] == '/':
+      inc cuts
+      if cuts == 2:
+        cut = i
+        break
+    dec i
+  if cut <= 0: "" else: nimony[0 ..< cut]
 
 proc libDirOf(nimony: string): string =
   ## <nimony repo>/lib, from <repo>/bin/nimony
@@ -244,7 +278,9 @@ proc build*(entry: string, t: Tools, verbose = false,
 
   let useSem = t.semVariant == "aowlsem" and t.aowlsem.len > 0 and
                tools.fileExists(t.aowlsem) and getEnv("AOWLMONY_NO_AOWLSEM", "").len == 0
-  if useSem: writeShim(st & "/nimsem", semShim(t, libDirOf(t.nimony)))
+  if useSem:
+    let root = repoRootOf(t.nimony)
+    writeShim(st & "/nimsem", semShim(t, root & "/lib", root & "/src/lib", st))
   else: removeIfPresent(st & "/nimsem")
   result.usedSem = useSem
 

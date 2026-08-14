@@ -9,3 +9,12 @@ examples/*.js
 examples/*.py
 DESIGN.md
 ROADMAP.md
+
+# Nimony build output. The binary comes from ./build.sh and, once it reaches
+# parity, ships as a release asset — it is never committed.
+nimcache/
+bin/aowlmony-ng
+.aowlmony/
+
+# Machine-local include paths for the editor tooling (build.sh takes AOWLKIT).
+.aowlcode.flags

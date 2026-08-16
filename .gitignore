@@ -18,3 +18,7 @@ bin/aowlmony-ng
 
 # Machine-local include paths for the editor tooling (build.sh takes AOWLKIT).
 .aowlcode.flags
+
+# Release artifacts. Built by ./release.sh and uploaded as release assets;
+# a binary in git is a binary someone eventually ships by accident.
+dist/

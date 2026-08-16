@@ -52,10 +52,16 @@ norm() {
 
 # Deliberate differences, with reasons.
 #   why           : a new command; the JS driver has no answer for "what changed"
-#   <unported>    : ts/js/py/verify still belong to the JS driver, and the Nimony
-#                   build says so with exit 3 rather than guessing
 #   help          : lists the new `why` command
-EXPECTED_DIFF=("help" "why FIX/hello.nim")
+#   nif … -v      : the Nimony build reports the CACHE under -v — hit/miss and
+#                   the moved-inputs denominator — and on a hit it does not print
+#                   the "nifparser parses …" pipeline line, because on a hit no
+#                   pipeline ran. The JS driver has no cache readout at all, which
+#                   is what let a 100% miss rate look like a fast machine.
+#
+# ts/js/py/verify are NOT in this list: they are ported and must match the oracle
+# byte for byte. (An earlier comment here claimed otherwise; it was stale.)
+EXPECTED_DIFF=("help" "why FIX/hello.nim" "nif FIX/hello.nim -v")
 
 CASES=(
   "help"

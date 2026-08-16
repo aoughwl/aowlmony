@@ -146,6 +146,81 @@ else
   bad "a second project shares the first one's stage" "p1=$base_stage p2=$p2_stage"
 fi
 
+# --- 6. `why` tells the truth in BOTH directions -----------------------------
+# It could not, and nothing caught it: `why` computed its closure with an empty
+# libDir while the build passed the real one, so it compared a manifest carrying
+# the whole stdlib against a recorded one that by construction never could. It
+# reported every stdlib module as newly added, on every unchanged program, for
+# ever. A one-directional check would have passed — hence both directions here.
+mkdir -p "$TMP/wy"
+cat > "$TMP/wy/main.nim" <<'NIM'
+import std/syncio
+import helper
+echo greet()
+NIM
+cat > "$TMP/wy/helper.nim" <<'NIM'
+proc greet*(): string = "one"
+NIM
+NO_COLOR=1 "$NG" nif "$TMP/wy/main.nim" >/dev/null 2>&1
+why_clean="$(NO_COLOR=1 "$NG" why "$TMP/wy/main.nim" 2>/dev/null)"
+if echo "$why_clean" | grep -q "nothing changed"; then
+  ok "after a build, why reports nothing changed"
+else
+  bad "after a build, why reports nothing changed" "said: $(echo "$why_clean" | head -2 | tr '\n' ' ')"
+fi
+
+# and the other direction: an edit must be NAMED, and named by path
+mtime_before="$(stat -c %Y "$TMP/wy/helper.nim")"
+cat > "$TMP/wy/helper.nim" <<'NIM'
+proc greet*(): string = "two"
+NIM
+touch -d "@$mtime_before" "$TMP/wy/helper.nim"
+why_dirty="$(NO_COLOR=1 "$NG" why "$TMP/wy/main.nim" 2>/dev/null)"
+if echo "$why_dirty" | grep -q "helper.nim"; then
+  ok "why names the module whose CONTENT moved under a preserved mtime"
+else
+  bad "why names the module whose content moved" "said: $(echo "$why_dirty" | head -2 | tr '\n' ' ')"
+fi
+
+# --- 7. a hit skips the compiler, and a miss does not ------------------------
+# The readout is the point: without it a 100% miss rate looks exactly like a fast
+# machine. Asserted on the reported compile time, which is the user-visible claim.
+NO_COLOR=1 "$NG" nif "$TMP/wy/main.nim" >/dev/null 2>&1   # take the edit
+hit_line="$(NO_COLOR=1 "$NG" nif "$TMP/wy/main.nim" -v 2>&1 | grep -c 'cache hit')"
+if [ "$hit_line" = "1" ]; then
+  ok "an unchanged rebuild reports a cache hit"
+else
+  bad "an unchanged rebuild reports a cache hit" "grep found $hit_line"
+fi
+
+cat > "$TMP/wy/helper.nim" <<'NIM'
+proc greet*(): string = "three"
+NIM
+miss_out="$(NO_COLOR=1 "$NG" nif "$TMP/wy/main.nim" -v 2>&1)"
+if echo "$miss_out" | grep -q 'cache miss · 1 of'; then
+  ok "a changed input reports a miss, with the denominator"
+else
+  bad "a changed input reports a miss with the denominator" \
+      "said: $(echo "$miss_out" | grep cache | head -1)"
+fi
+
+# --- 8. the closure is THIS program's, not the whole shared stage -------------
+# The stage is shared by design, so "every .p.nif in the nc" is every module of
+# every project that ever used this toolchain: measured, a hello-world's manifest
+# carried 117 deps, nearly all of them other projects' deleted /tmp fixtures.
+# Over-invalidation, unbounded growth, and one project's edit missing another's
+# cache. p2/other.nim imports nothing of its own, so its manifest must be small —
+# and must not mention p1, which shares its stage.
+NO_COLOR=1 "$NG" nif "$TMP/p2/other.nim" >/dev/null 2>&1
+p2_inputs="$(NO_COLOR=1 "$NG" nif "$TMP/p2/other.nim" -v 2>&1 | sed -n 's/.*of \([0-9]*\) inputs moved.*/\1/p' | tail -1)"
+p1_named="$(NO_COLOR=1 "$NG" why "$TMP/p2/other.nim" 2>/dev/null | grep -c 'p1/' || true)"
+if [ -n "$p2_inputs" ] && [ "$p2_inputs" -le 2 ] && [ "$p1_named" = "0" ]; then
+  ok "a program's manifest covers its own modules only ($p2_inputs), not the shared stage"
+else
+  bad "a program's manifest covers its own modules only" \
+      "inputs=$p2_inputs, lines naming the other project=$p1_named"
+fi
+
 echo ""
 echo "$pass passed · $fail failed"
 [ "$fail" = 0 ] || exit 1

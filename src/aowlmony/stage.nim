@@ -154,17 +154,58 @@ proc absolutise*(base, p: string): string =
   result = ""
   for seg in parts: result.add "/" & seg
 
-proc userClosure*(nc, stage, libDir: string): seq[string] =
-  ## Every module the compiler actually parsed, minus the toolchain's own
-  ## library — a stdlib file only changes when the toolchain does, and that is
-  ## already in the stage key.
+proc endsWithPhase*(name, phase: string): bool =
+  ## Does `name` end in this phase suffix, in EITHER spelling?
+  ##
+  ## `.aif` — aowl intermediate format — is the house name and the one we write;
+  ## nimony still emits `.nif`. Both are the same bytes, so every reader here
+  ## takes either and no caller has to know which produced the artifact.
+  name.endsWith(phase & ".aif") or name.endsWith(phase & ".nif")
+
+proc stripPhase*(name, phase: string): string =
+  ## `<hash>.c.aif` / `<hash>.c.nif` -> `<hash>`; "" when it is neither.
+  if not endsWithPhase(name, phase): return ""
+  name[0 ..< name.len - (phase.len + 4)]
+
+proc phaseFile*(nc, stem, phase: string): string =
+  ## The artifact for this module and phase, whichever spelling is on disk.
+  ## `.aif` wins when both exist — it is the format we own.
+  let a = nc & "/" & stem & phase & ".aif"
+  if tools.fileExists(a): return a
+  let n = nc & "/" & stem & phase & ".nif"
+  if tools.fileExists(n): return n
+  ""
+
+proc programClosure*(nc, stage, mainHash, libDir: string): seq[string] =
+  ## The modules THIS program is made of, minus the toolchain's own library — a
+  ## stdlib file only changes when the toolchain does, and that is already in
+  ## the stage key.
+  ##
+  ## The source is `nc/<mainHash>/`, the subdirectory `nimony c` fills with one
+  ## `.c.nif` per module actually linked into this entry point. That is the
+  ## compiler's own answer to "what is this program made of", which is why it is
+  ## read from here rather than re-derived: the `.p.deps.nif` sidecars record
+  ## module EXPRESSIONS (`std/syncio`), not files, so using them would mean
+  ## reimplementing import resolution.
+  ##
+  ## ⚠️ It must NOT be every `.p.nif` in the stage, which is what this proc used
+  ## to do. The stage is shared across projects by design, so that set is every
+  ## module of every project that ever used this toolchain: measured on this box,
+  ## a hello-world's manifest carried 117 deps, nearly all of them other
+  ## projects' long-deleted /tmp fixtures. Safe — it over-invalidates, never
+  ## under — but it grows without bound and lets one project's edit miss
+  ## another project's cache.
   result = @[]
-  let ls = runCaptured("ls", @[nc], "", false)
+  if mainHash.len == 0: return
+  let ls = runCaptured("ls", @[nc & "/" & mainHash], "", false)
   if not ls.ok or ls.exitCode != 0: return
   for line in splitLines(ls.output):
     let name = strip(line)
-    if not name.endsWith(".p.nif"): continue
-    let src = sourceOfPnif(nc & "/" & name)
+    let modHash = stripPhase(name, ".c")
+    if modHash.len == 0: continue
+    let pnif = phaseFile(nc, modHash, ".p")
+    if pnif.len == 0: continue
+    let src = sourceOfPnif(pnif)
     if src.len == 0: continue
     let abs = absolutise(stage, src)
     if abs.len == 0: continue
@@ -187,11 +228,16 @@ proc sortLines(xs: var seq[string]) =
       inc j
     inc i
 
-proc buildManifest*(entry: string, closure: seq[string], t: Tools): string =
+proc buildManifest*(entry, mainHash: string, closure: seq[string], t: Tools): string =
   ## Sorted, so discovery order cannot change the key and two manifests can be
   ## diffed by a merge walk.
+  ##
+  ## The `main` line records which module in the stage IS this program, so a
+  ## later run can find this entry's own artifacts without re-deriving the
+  ## wrapper/prelude logic that produced the compile target.
   var lines: seq[string] = @[]
   lines.add "entry " & entry & " " & fileHash(entry)
+  if mainHash.len > 0: lines.add "main " & mainHash
   for f in closure:
     if f == entry: continue
     lines.add "dep " & f & " " & fileHash(f)
@@ -199,6 +245,50 @@ proc buildManifest*(entry: string, closure: seq[string], t: Tools): string =
     if l.len > 0: lines.add "tool= " & l
   sortLines(lines)
   joinLines(lines)
+
+proc libDirOf*(nimony: string): string =
+  ## `<nimony repo>/lib`, from `<repo>/bin/nimony`. The stdlib is excluded from
+  ## every manifest: a stdlib file only changes when the toolchain does, and the
+  ## toolchain is already in the stage key.
+  var cuts = 0
+  var i = nimony.len - 1
+  var cut = -1
+  while i >= 0:
+    if nimony[i] == '/':
+      inc cuts
+      if cuts == 2:
+        cut = i
+        break
+    dec i
+  if cut <= 0: "" else: nimony[0 ..< cut] & "/lib"
+
+proc mainHashOf*(manifest: string): string =
+  ## Which module in the stage this entry's last successful build produced.
+  result = ""
+  for l in splitLines(manifest):
+    if l.startsWith("main "): return strip(l[5 ..< l.len])
+
+proc currentManifest*(t: Tools, entryAbs, mainHash: string): string =
+  ## THE manifest for this entry under this toolchain — the one and only place
+  ## the closure rule is spelled.
+  ##
+  ## ⚠️ It is a proc rather than three call sites because it once WAS three call
+  ## sites: `build` passed `libDirOf(t.nimony)` while `why` and `watch` passed
+  ## `""`, so `why` compared a manifest carrying the whole stdlib against a
+  ## recorded one that by construction never could — and could therefore never
+  ## report "nothing changed". A rule that decides what a build depends on gets
+  ## written once.
+  let st = stageDir(t)
+  buildManifest(entryAbs, mainHash,
+                programClosure(st & "/nc", st, mainHash, libDirOf(t.nimony)), t)
+
+proc inputCount*(manifest: string): int =
+  ## How many source inputs a manifest covers — the DENOMINATOR for the hit/miss
+  ## readout. A cache that reports only its hits cannot be told from one that
+  ## never looked.
+  result = 0
+  for l in splitLines(manifest):
+    if l.startsWith("dep ") or l.startsWith("entry "): inc result
 
 proc manifestPath*(stage, entry: string): string =
   ## One manifest per entry point, inside the shared stage.

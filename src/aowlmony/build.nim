@@ -31,6 +31,9 @@ type BuildResult* = object
   lineShift*: int      ## lines the prelude wrapper added above the user's first
   userFile*: string    ## the file the user actually wrote, when a wrapper was used
   wrapFile*: string    ## the generated wrapper, "" when none was needed
+  cacheHit*: bool      ## the recorded manifest matched and the artifacts were there
+  inputsTotal*: int    ## inputs the manifest covers (entry + user closure)
+  inputsMoved*: int    ## of those, how many had different content than last time
 
 proc shellQuoteJson(s: string): string =
   ## A bash double-quoted literal for embedding a path in a generated shim.
@@ -163,19 +166,40 @@ proc repoRootOf(nimony: string): string =
     dec i
   if cut <= 0: "" else: nimony[0 ..< cut]
 
-proc libDirOf(nimony: string): string =
-  ## <nimony repo>/lib, from <repo>/bin/nimony
-  var cuts = 0
-  var i = nimony.len - 1
-  var cut = -1
-  while i >= 0:
-    if nimony[i] == '/':
-      inc cuts
-      if cuts == 2:
-        cut = i
-        break
-    dec i
-  if cut <= 0: "" else: nimony[0 ..< cut] & "/lib"
+proc adoptArtifacts(res: var BuildResult, nc, compileTarget, mainHash, cnif: string) =
+  ## Everything derivable from a main-module hash whose artifacts are on disk.
+  ##
+  ## Written once and called from BOTH the compiled path and the cache-hit path:
+  ## two spellings of "which files did this build produce" is exactly the shape
+  ## that lets a hit and a miss quietly describe different programs.
+  res.mainHash = mainHash
+  res.cnif = cnif
+  # either spelling: .aif is ours, nimony still writes .nif, both are the same bytes
+  res.snif = phaseFile(nc, mainHash, ".s")
+  res.pnif = phaseFile(nc, mainHash, ".p")
+  var pn = ""
+  try:
+    pn = readFile(res.pnif)
+  except:
+    pn = ""
+  res.byOurParser = contains(pn, "vendor \"aowlparser\"") or
+                    contains(pn, "vendor \"aifparser\"") or
+                    contains(pn, "vendor \"nifparser\"")
+
+  # `nimony c` also links a binary next to the module's .c.nif, named after the
+  # source stem. We already paid for that compile, and unlike our own native
+  # backend today it handles stdout — so `verify` can use it as a native leg.
+  var stem = compileTarget
+  var slash = -1
+  var i = 0
+  while i < stem.len:
+    if stem[i] == '/': slash = i
+    inc i
+  if slash >= 0: stem = stem[slash + 1 ..< stem.len]
+  let dot = find(stem, '.')
+  if dot > 0: stem = stem[0 ..< dot]
+  let nbin = nc & "/" & mainHash & "/" & stem
+  if tools.fileExists(nbin): res.nbin = nbin
 
 proc findMain(nc, stage, absEntry: string): tuple[hash: string, cnif: string] =
   ## The main module is the nc subdirectory holding <hash>.c.nif named after
@@ -191,9 +215,11 @@ proc findMain(nc, stage, absEntry: string): tuple[hash: string, cnif: string] =
   for line in splitLines(ls.output):
     let d = strip(line)
     if d.len == 0: continue
-    let c = nc & "/" & d & "/" & d & ".c.nif"
-    if not tools.fileExists(c): continue
-    let src = sourceOfPnif(nc & "/" & d & ".p.nif")
+    let c = phaseFile(nc & "/" & d, d, ".c")
+    if c.len == 0: continue
+    let p = phaseFile(nc, d, ".p")
+    if p.len == 0: continue
+    let src = sourceOfPnif(p)
     if src.len == 0: continue
     if absolutise(stage, src) == absEntry: return (d, c)
   ("", "")
@@ -285,18 +311,48 @@ proc build*(entry: string, t: Tools, verbose = false,
   result.usedSem = useSem
 
   # Content freshness over the whole user closure, not just the entry file.
-  let lib = libDirOf(t.nimony)
-  let closure = userClosure(nc, st, lib)
   let mpath = manifestPath(st, abs)
   let prev = readManifest(mpath)
-  let cur = buildManifest(abs, closure, t)
+  let prevMain = mainHashOf(prev)
+  let cur = currentManifest(t, abs, prevMain)
+  result.inputsTotal = inputCount(cur)
   if prev.len > 0:
-    for f in changedFiles(prev, cur):
+    let moved = changedFiles(prev, cur)
+    result.inputsMoved = moved.len
+    for f in moved:
       bumpMtime(f)
   elif tools.fileExists(abs):
     # first build for this entry: nothing to compare against, so make sure the
     # entry is not older than a cached artifact from another checkout.
+    result.inputsMoved = result.inputsTotal
     bumpMtime(abs)
+
+  let bypassed = getEnv("AOWLMONY_NO_CACHE", "").len > 0
+  if verbose:
+    stderr.writeLine "  " & dim(GDot) & " " & gray("cache " &
+      (if bypassed: "bypassed (AOWLMONY_NO_CACHE)"
+       elif prev.len == 0: "cold (no manifest for this entry)"
+       elif result.inputsMoved == 0: "hit"
+       else: "miss") & " · " & $result.inputsMoved & " of " & $result.inputsTotal &
+      " inputs moved · stage ") & dim(st)
+
+  # THE HIT. Three conditions, and all three are load-bearing:
+  #   1. a manifest was recorded — i.e. a previous build of this entry SUCCEEDED
+  #      under this toolchain (failures never write one);
+  #   2. it is byte-equal to the manifest of the inputs as they stand now, so
+  #      every source and every tool binary is the one that produced it;
+  #   3. the artifacts it promised are still on disk — a key is not evidence
+  #      that a file survived `clean`, a full disk, or another checkout.
+  # Only then is skipping the compiler sound. Without this the driver pays a
+  # full ~1.1s front-end invocation to be told nothing changed, which is the
+  # one number a build/run loop feels.
+  if prev.len > 0 and prev == cur and not bypassed:
+    let hit = findMain(nc, st, compileTarget)
+    if hit.hash.len > 0 and phaseFile(nc, hit.hash, ".s").len > 0:
+      adoptArtifacts(result, nc, compileTarget, hit.hash, hit.cnif)
+      result.cacheHit = true
+      result.ok = true
+      return
 
   if verbose:
     var stemName = abs
@@ -355,33 +411,14 @@ proc build*(entry: string, t: Tools, verbose = false,
     result.ok = false
     return
 
-  result.snif = nc & "/" & m.hash & ".s.nif"
-  result.pnif = nc & "/" & m.hash & ".p.nif"
-  var pn = ""
-  try:
-    pn = readFile(result.pnif)
-  except:
-    pn = ""
-  result.byOurParser = contains(pn, "vendor \"aowlparser\"") or
-                       contains(pn, "vendor \"aifparser\"") or
-                       contains(pn, "vendor \"nifparser\"")
-
-  # `nimony c` also links a binary next to the module's .c.nif, named after the
-  # source stem. We already paid for that compile, and unlike our own native
-  # backend today it handles stdout — so `verify` can use it as a native leg.
-  var stem = compileTarget
-  var slash = -1
-  var i = 0
-  while i < stem.len:
-    if stem[i] == '/': slash = i
-    inc i
-  if slash >= 0: stem = stem[slash + 1 ..< stem.len]
-  let dot = find(stem, '.')
-  if dot > 0: stem = stem[0 ..< dot]
-  let nbin = nc & "/" & m.hash & "/" & stem
-  if tools.fileExists(nbin): result.nbin = nbin
+  adoptArtifacts(result, nc, compileTarget, m.hash, m.cnif)
 
   # Record the manifest only on SUCCESS. A poisoned build must not leave a key
   # claiming its inputs were satisfied.
-  writeManifest(mpath, cur)
+  #
+  # Recomputed AFTER the build, not reused from before it: the pre-build closure
+  # is read from the PREVIOUS program's module set, so a build that adds an
+  # import would otherwise record a manifest missing the module it just started
+  # depending on — and only notice it one build later.
+  writeManifest(mpath, currentManifest(t, abs, m.hash))
   result.ok = true

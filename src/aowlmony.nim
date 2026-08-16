@@ -680,10 +680,7 @@ proc main() =
         gray(" in this toolchain's cache")
       stdout.writeLine "  " & dim("stage ") & dim(st)
       return
-    let lib = if t.nimony.len > 0: t.nimony else: ""
-    discard lib
-    let closure = userClosure(st & "/nc", st, "")
-    let cur = buildManifest(absSrc, closure, t)
+    let cur = currentManifest(t, absSrc, mainHashOf(prev))
     let diffs = explainLines(prev, cur)
     if diffs.len == 0:
       stdout.writeLine "  " & green(GOk) & " " & gray("nothing changed — a build now would be a cache hit")
@@ -698,13 +695,12 @@ proc main() =
   if cmd == "watch":
     # Poll the manifest rather than the filesystem: the manifest is content, and
     # the whole point of this driver's cache is that a timestamp is not evidence.
-    let st = stageDir(t)
     stdout.writeLine "  " & gray("watching ") & cyan(tildeAbbrev(absSrc)) &
       dim("   (ctrl-c to stop)")
     var last = ""
     while true:
-      let closure = userClosure(st & "/nc", st, "")
-      let now = buildManifest(absSrc, closure, t)
+      let now = currentManifest(t, absSrc,
+                  mainHashOf(readManifest(manifestPath(stageDir(t), absSrc))))
       if now != last:
         last = now
         let wb = build.build(file, t, false, proj, depPaths)

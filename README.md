@@ -38,6 +38,17 @@ knob for *which* toolchain does the work.
 (e.g. `aowlmony +nimony run foo.nim`). Everything else lives in `aowlup` (the
 toolchain manager) — `aowlmony` only ever *compiles*.
 
+## Two builds in this repo, and which one you run
+
+`aowlmony` is written in the language it compiles. `bin/aowlmony-ng` is that
+build and it is the one installed; `bin/aowlmony` is the original Node
+implementation, kept as the **differential oracle** — `test/diff.sh` runs both
+over the whole command surface and requires byte-identical stdout, stderr and
+exit code, so any difference is either a bug or a listed, reasoned improvement.
+
+It is not dead code and it is not a fallback. When the two disagree, that
+disagreement is the finding.
+
 ## Manager + driver — `aowlup : aowlmony`
 
 The toolchain interface is two tools, modelled on **`rustup` : `cargo`**:

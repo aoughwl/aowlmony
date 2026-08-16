@@ -115,6 +115,59 @@ else
   bad "an unresolvable dep is named and fails the command" "rc=$rc"
 fi
 
+# 6 --------------------------------- the lock records CONTENT, not only a name
+# A commit id says which content was ASKED for. The tree hash says which content
+# was USED. They come apart exactly when it matters: an interrupted clone, a
+# hand-edit in the shared store, a half-deleted entry.
+sed -i '/^ghost /d' mony.toml 2>/dev/null || true
+grep -v '^ghost ' mony.toml > "$TMP/mt" && mv "$TMP/mt" mony.toml
+NO_COLOR=1 "$NG" fetch >/dev/null 2>&1
+if grep -qE '^dep8? .* [0-9a-f]{7,}$' mony.lock || \
+   awk '$2=="git" && $5 != "-" && length($5) > 6 {found=1} END{exit !found}' mony.lock; then
+  ok "mony.lock records the content a git dep resolved to, not just its commit"
+else
+  bad "mony.lock records the content a git dep resolved to" "$(grep -v '^#' mony.lock | head -2)"
+fi
+
+# a PATH dep used to be written as `-`: the one dependency that can change under
+# you between two builds was the one the lockfile said nothing about.
+mkdir -p "$TMP/sibling/src"
+cat > "$TMP/sibling/mony.toml" <<'TOML'
+[package]
+name = "sibling"
+TOML
+cat > "$TMP/sibling/src/sibling.nim" <<'NIM'
+proc sib*(): int = 1
+NIM
+cat >> mony.toml <<TOML
+sibling = { path = "$TMP/sibling" }
+TOML
+NO_COLOR=1 "$NG" fetch >/dev/null 2>&1
+before="$(awk '$1=="sibling"{print $5}' mony.lock)"
+cat > "$TMP/sibling/src/sibling.nim" <<'NIM'
+proc sib*(): int = 2
+NIM
+NO_COLOR=1 "$NG" fetch >/dev/null 2>&1
+after="$(awk '$1=="sibling"{print $5}' mony.lock)"
+if [ -n "$before" ] && [ "$before" != "-" ] && [ -n "$after" ] && [ "$before" != "$after" ]; then
+  ok "a path dep is fingerprinted, and editing it moves the fingerprint"
+else
+  bad "a path dep is fingerprinted and the fingerprint moves" "before='$before' after='$after'"
+fi
+
+# 7 ------------------------------------------------- --offline is a real flag
+# It was a parameter nothing ever passed: the "not in mony.lock and offline"
+# branch was unreachable code.
+cat >> mony.toml <<'TOML'
+unlocked = { git = "https://example.invalid/nope", tag = "v1" }
+TOML
+off="$(NO_COLOR=1 "$NG" fetch --offline 2>&1)"; rc=$?
+if [ "$rc" != "0" ] && echo "$off" | grep -q "offline"; then
+  ok "--offline refuses to ask a remote, and says that is why"
+else
+  bad "--offline refuses to ask a remote" "rc=$rc out=$(echo "$off" | tail -2 | tr '\n' '|')"
+fi
+
 echo ""
 echo "$pass passed · $fail failed"
 [ "$fail" = 0 ] || exit 1

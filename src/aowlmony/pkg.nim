@@ -23,6 +23,7 @@ type Resolved* = object
   source*: string   ## "path" | "git"
   url*: string
   rev*: string      ## the exact commit, never a moving tag
+  tree*: string     ## fingerprint of the CONTENT that was actually used
   dir*: string      ## where it landed on disk
   ok*: bool
   err*: string
@@ -54,24 +55,72 @@ proc readLock*(p: Project): seq[Resolved] =
     for f in split(line, ' '):
       if f.len > 0: fields.add f
     if fields.len < 4: continue
+    # A 4-field lock is one this tool wrote before it recorded content; it is
+    # read, not rejected — an old lockfile is not a corrupt one.
+    let tree = if fields.len >= 5 and fields[4] != "-": fields[4] else: ""
     result.add Resolved(name: fields[0], source: fields[1], url: fields[2],
-                        rev: fields[3], dir: "", ok: true, err: "")
+                        rev: fields[3], tree: tree, dir: "", ok: true, err: "")
 
 proc writeLock*(p: Project, rs: seq[Resolved]) =
   var s = "# mony.lock — resolved dependencies. Generated; edit mony.toml instead.\n" &
-          "# name source url rev\n"
+          "# name source url rev content\n"
   for r in rs:
     if not r.ok: continue
     s.add r.name & " " & r.source & " " & (if r.url.len > 0: r.url else: "-") &
-      " " & (if r.rev.len > 0: r.rev else: "-") & "\n"
+      " " & (if r.rev.len > 0: r.rev else: "-") &
+      " " & (if r.tree.len > 0: r.tree else: "-") & "\n"
   try:
     writeFile(lockPath(p), s)
   except:
     discard
 
+proc treeHashOf*(dir: string): string =
+  ## A fingerprint of the CONTENT a dep was resolved to.
+  ##
+  ## For a git checkout that is the tree object the revision names — exact, and
+  ## free, because git already computed it. For a path dep there is no such
+  ## object, so it is a hash over the sorted (path, sha1) pairs of its `.nim`
+  ## sources: the files the compiler will actually read.
+  ##
+  ## Why a PATH dep needs one at all: `mony.lock` pinned git deps to a commit and
+  ## wrote `-` for path deps, so the one kind of dependency that changes under
+  ## you between two builds — a sibling directory someone is editing — was the
+  ## one the lockfile said nothing about.
+  let g = runCaptured("git", @["-C", dir, "rev-parse", "HEAD^{tree}"], "", false)
+  if g.ok and g.exitCode == 0:
+    let t = strip(g.output)
+    if t.len > 0: return t
+  let ls = runCaptured("find", @[dir, "-name", "*.nim", "-type", "f"], "", false)
+  if not (ls.ok and ls.exitCode == 0): return ""
+  var names: seq[string] = @[]
+  for line in splitLines(ls.output):
+    let f = strip(line)
+    if f.len > 0: names.add f
+  # sorted, so the filesystem's traversal order cannot change the fingerprint
+  var i = 0
+  while i < names.len:
+    var j = i + 1
+    while j < names.len:
+      if names[j] < names[i]: swap(names[i], names[j])
+      inc j
+    inc i
+  var acc = ""
+  for f in names:
+    acc.add f
+    acc.add " "
+    acc.add fileHash(f)
+    acc.add "\n"
+  if acc.len == 0: return ""
+  sha1Hex(acc)
+
 proc lockedRev(locked: seq[Resolved], name, url: string): string =
   for l in locked:
     if l.name == name and (l.url == url or url.len == 0): return l.rev
+  ""
+
+proc lockedTree(locked: seq[Resolved], name: string): string =
+  for l in locked:
+    if l.name == name: return l.tree
   ""
 
 proc remoteRev(url, want: string): string =
@@ -92,8 +141,8 @@ proc remoteRev(url, want: string): string =
   ""
 
 proc fetchGit(name, url, rev: string): Resolved =
-  result = Resolved(name: name, source: "git", url: url, rev: rev, dir: "",
-                    ok: false, err: "")
+  result = Resolved(name: name, source: "git", url: url, rev: rev, tree: "",
+                    dir: "", ok: false, err: "")
   if rev.len == 0:
     result.err = "could not resolve a revision"
     return
@@ -101,6 +150,7 @@ proc fetchGit(name, url, rev: string): Resolved =
   let dir = storeDir() & "/" & key
   result.dir = dir
   if dirExists(dir & "/.git"):
+    result.tree = treeHashOf(dir)
     result.ok = true
     return
   discard execShellCmd("mkdir -p " & quoteShell(storeDir()))
@@ -116,6 +166,7 @@ proc fetchGit(name, url, rev: string): Resolved =
     result.err = "no such revision " & rev[0 ..< 8]
     discard execShellCmd("rm -rf " & quoteShell(dir))
     return
+  result.tree = treeHashOf(dir)
   result.ok = true
 
 proc resolveDeps*(p: Project, offline = false): seq[Resolved] =
@@ -126,23 +177,36 @@ proc resolveDeps*(p: Project, offline = false): seq[Resolved] =
   let locked = readLock(p)
   for d in p.deps:
     if d.path.len > 0:
+      let pdir = absDep(p, d)
       result.add Resolved(name: d.name, source: "path", url: d.path, rev: "",
-                          dir: absDep(p, d), ok: true, err: "")
+                          tree: treeHashOf(pdir), dir: pdir, ok: true, err: "")
     elif d.git.len > 0:
       var rev = lockedRev(locked, d.name, d.git)
       if rev.len == 0 and not offline:
         rev = remoteRev(d.git, d.version)
       if rev.len == 0:
         result.add Resolved(name: d.name, source: "git", url: d.git, rev: "",
-                            dir: "", ok: false,
+                            tree: "", dir: "", ok: false,
                             err: (if offline: "not in mony.lock and offline"
                                   else: "could not resolve " &
                                         (if d.version.len > 0: d.version else: "HEAD")))
       else:
-        result.add fetchGit(d.name, d.git, rev)
+        var got = fetchGit(d.name, d.git, rev)
+        # ⚠️ The store is a shared directory keyed on (url, rev). A key is not
+        # evidence that the bytes under it are still the ones that key names —
+        # an interrupted clone, a hand-edit, a half-deleted entry all leave a
+        # directory that looks resolved. If the lock recorded what the content
+        # was, say so when it no longer is, rather than compiling it.
+        let want = lockedTree(locked, d.name)
+        if got.ok and want.len > 0 and got.tree.len > 0 and got.tree != want:
+          got.ok = false
+          got.err = "the store copy no longer matches mony.lock (locked " &
+            want[0 ..< 12] & ", found " & got.tree[0 ..< 12] &
+            ") — delete " & got.dir & " to re-fetch"
+        result.add got
     else:
       result.add Resolved(name: d.name, source: "index", url: "", rev: "",
-                          dir: "", ok: false,
+                          tree: "", dir: "", ok: false,
                           err: "version deps need the package index, which does not exist yet")
 
 proc depSearchPaths*(rs: seq[Resolved]): seq[string] =

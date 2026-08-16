@@ -60,6 +60,7 @@ type Opts = object
   faithful: bool
   run: bool
   watchAs: string        ## `watch --as <command>`; what a change re-runs
+  offline: bool          ## never ask a remote what a tag means
   memory: bool
   timeout: int
   native: string
@@ -76,7 +77,8 @@ proc isAowliFlag(a: string): bool =
 proc parseOpts(argv: seq[string]): Opts =
   result = Opts(rest: @[], args: @[], aowli: @[], progArgs: @[], outFile: "",
                 entry: "", evalCode: "", hasEval: false, faithful: false,
-                run: false, watchAs: "", memory: false, timeout: 0, native: "",
+                run: false, watchAs: "", offline: false, memory: false,
+                timeout: 0, native: "",
                 showTime: true, verbose: false)
   var i = 0
   while i < argv.len:
@@ -124,6 +126,7 @@ proc parseOpts(argv: seq[string]): Opts =
     elif a == "--as":
       inc i
       if i < argv.len: result.watchAs = argv[i]
+    elif a == "--offline": result.offline = true
     elif a == "--no-cache":
       # One mechanism, not two: the build reads the env var, so the flag sets it
       # rather than threading a second switch down to the same decision.
@@ -186,7 +189,7 @@ proc cmdHelp(t: Tools) =
     dim(" sem=") & cyan(t.semVariant) & dim("   one-shot: ") &
     teal("aowlmony +nimony run <file>")
   stdout.writeLine "  " & gray("options ") & GArrow & " " &
-    dim("-o  --entry  --arg  --faithful  --run  --no-cache  --no-time  --timeout:N  -v")
+    dim("-o  --entry  --arg  --faithful  --run  --offline  --no-cache  --no-time  --timeout:N  -v")
   stdout.writeLine "  " & gray("aowli   ") & GArrow & " " &
     dim("interp/vm/eval forward --trace[-full|-profile] --trace-depth:N, the hybrid ") &
     dim("family (--hybrid --build-native --interpret: --native-src: --native-lib:), and ") &
@@ -515,7 +518,7 @@ proc main() =
   # that names no cause.
   var depPaths: seq[string] = @[]
   if proj.found and proj.deps.len > 0:
-    let resolved = resolveDeps(proj)
+    let resolved = resolveDeps(proj, o.offline)
     for d in resolved:
       if d.ok:
         note(o.verbose, "dep " & d.name & " → " & d.dir)
@@ -587,7 +590,7 @@ proc main() =
       note(true, "no dependencies declared in mony.toml")
       return
     stdout.write banner(Prog, "resolving dependencies")
-    let resolved = resolveDeps(proj)
+    let resolved = resolveDeps(proj, o.offline)
     var rows: seq[seq[string]] = @[]
     var bad = 0
     for d in resolved:

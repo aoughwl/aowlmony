@@ -1,4 +1,0 @@
-(.nif27)
-(.indexat 96               )
-(stmts
- (import "/home/savant/nimony/lib/std/system.nim"))(.index)

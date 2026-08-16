@@ -1,6 +1,0 @@
-(stmts
- (roots `nimEnviron.0. `main.0. `cmdCount.0. `cmdLine.0.)
- (uses `main.0. `nimEnviron.0. `cchar.0. `cmdCount.0. `argv.0. `argc.0. `envp.0. nimFlushStdStreams.0.sysvq0asl `ini.0. `cmdLine.0.)
- (uses strlit.0.I4170858454456741928. LongString.0.sysvq0asl)
- (uses `ini.0. stdout.0.syn1lfpjv write.7.syn1lfpjv write.0.syn1lfpjv strlit.0.I4170858454456741928. write.2.syn1lfpjv `ini.0.sysvq0asl `ini.0.syn1lfpjv string.0.sysvq0asl `iniGuard.0.)
- (offers strlit.0.I4170858454456741928.))

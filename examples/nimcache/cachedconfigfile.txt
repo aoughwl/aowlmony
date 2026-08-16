@@ -1,1 +1,0 @@
---base:/home/savant/aowlmony/examples -d:nimony --bits:64 --cpu:amd64 --os:Linux /home/savant/aowlmony/examples/hello.nim --passC: --passL:

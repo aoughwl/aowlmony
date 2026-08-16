@@ -1,9 +1,0 @@
-(.nif27)
-(.vendor "Nifler")
-(.dialect "nim-parsed")
-(stmts@,1,hello.nim
- (import
-  (infix@A / std~3 syncio@1))
- (cmd@,2 echo "hello from aifmony"@5)
- (cmd@,3 echo
-  (infix@7 * 6~2 7@2)))

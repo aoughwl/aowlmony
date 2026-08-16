@@ -22,3 +22,8 @@ bin/aowlmony-ng
 # Release artifacts. Built by ./release.sh and uploaded as release assets;
 # a binary in git is a binary someone eventually ships by accident.
 dist/
+
+# …including the one beside examples/. Both trees were tracked by accident: 143
+# files of compiler scratch, referenced by nothing, in a public repo — and one
+# path carried a local scratchpad session id.
+examples/nimcache/

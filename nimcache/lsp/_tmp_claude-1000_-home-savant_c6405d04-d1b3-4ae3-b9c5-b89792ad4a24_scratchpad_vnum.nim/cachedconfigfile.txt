@@ -1,1 +1,0 @@
---base:/tmp/claude-1000/-home-savant/c6405d04-d1b3-4ae3-b9c5-b89792ad4a24/scratchpad -d:nimony --bits:64 --cpu:amd64 --os:Linux /tmp/claude-1000/-home-savant/c6405d04-d1b3-4ae3-b9c5-b89792ad4a24/scratchpad/vnum.nim --passC: --passL:

@@ -1,5 +1,0 @@
-(.nif27)
-(.indexat 216              )
-(stmts
- (build
-  (tup@2,9,../../nimony/lib/std/system/mimalloc.nim "C" "../../nimony/vendor/mimalloc/src/static.c" "-DMI_STATS=1 -I/home/savant/nimony/vendor/mimalloc/include")))(.index)

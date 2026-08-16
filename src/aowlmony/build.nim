@@ -376,9 +376,19 @@ proc build*(entry: string, t: Tools, verbose = false,
   # path, so in a multi-file program the imported modules were parsed by nifler
   # while the provenance line still claimed our parser had run.
   var userList = compileTarget
-  if compileTarget != abs: userList.add ":" & abs
-  for f in userSources(proj):
-    if f != abs and f != compileTarget: userList.add ":" & f
+  var listed: seq[string] = @[compileTarget]
+  if compileTarget != abs:
+    userList.add ":" & abs
+    listed.add abs
+  var everySource = userSources(proj)
+  for f in sourcesUnder(depPaths): everySource.add f
+  for f in everySource:
+    var seenSrc = false
+    for x in listed:
+      if x == f: seenSrc = true
+    if seenSrc: continue
+    listed.add f
+    userList.add ":" & f
 
   var cmd = "cd " & quoteShell(st) & " && NIFRW_USER=" & quoteShell(userList) &
     " PATH=" & quoteShell(st) & ":$PATH "

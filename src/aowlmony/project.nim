@@ -186,6 +186,23 @@ proc userSources*(p: Project): seq[string] =
       let f = strip(line)
       if f.len > 0: result.add f
 
+proc sourcesUnder*(dirs: seq[string]): seq[string] =
+  ## Every `.nim` under these directories.
+  ##
+  ## For GIT deps, which live in the content store rather than under the
+  ## project, so `userSources` cannot see them — and until this existed their
+  ## modules went to nifler while the provenance line said our parser had run,
+  ## the same defect that had already been fixed once for the project's own
+  ## modules. A dependency is user code; only the stdlib is not.
+  result = @[]
+  for d in dirs:
+    if d.len == 0: continue
+    let found = runCaptured("find", @[d, "-name", "*.nim", "-type", "f"], "", false)
+    if not found.ok or found.exitCode != 0: continue
+    for line in splitLines(found.output):
+      let f = strip(line)
+      if f.len > 0: result.add f
+
 proc unresolvedDeps*(p: Project): seq[string] =
   result = @[]
   for d in p.deps:

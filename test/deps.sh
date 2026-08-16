@@ -168,6 +168,30 @@ else
   bad "--offline refuses to ask a remote" "rc=$rc out=$(echo "$off" | tail -2 | tr '\n' '|')"
 fi
 
+# 8 ------------------------- a git dep's modules go through OUR parser as well
+# `userSources` walks the project and its PATH deps; a git dep lives in the
+# content store, so it was invisible there and its modules went to nifler while
+# the provenance line said our parser had run. Exactly the defect that had
+# already been fixed once for the project's own modules — a dependency is user
+# code, only the stdlib is not.
+NO_COLOR=1 "$NG" nif >/dev/null 2>&1
+stage="$(NO_COLOR=1 "$NG" why 2>/dev/null | sed -n 's/^  stage //p' | tail -1)"
+dep_pnif=""
+for f in "$stage"/nc/*.p.nif "$stage"/nc/*.p.aif; do
+  [ -f "$f" ] || continue
+  head -c 400 "$f" 2>/dev/null | tr -d '\n' | grep -qF "/pkg/" && dep_pnif="$f"
+done
+if [ -n "$dep_pnif" ]; then
+  if head -c 200 "$dep_pnif" | grep -qE 'vendor "(aowl|aif|nif)parser"'; then
+    ok "a git dep's module was parsed by our parser"
+  else
+    bad "a git dep's module was parsed by our parser" \
+        "vendor is '$(head -c 200 "$dep_pnif" | sed -n 's/.*vendor "\([^"]*\)".*/\1/p' | head -1)'"
+  fi
+else
+  bad "the git dep's artifact was found in the stage" "looked in $stage/nc for a path under /pkg/"
+fi
+
 echo ""
 echo "$pass passed · $fail failed"
 [ "$fail" = 0 ] || exit 1

@@ -59,7 +59,7 @@ type Opts = object
   hasEval: bool
   faithful: bool
   run: bool
-  keep: bool
+  watchAs: string        ## `watch --as <command>`; what a change re-runs
   memory: bool
   timeout: int
   native: string
@@ -76,7 +76,7 @@ proc isAowliFlag(a: string): bool =
 proc parseOpts(argv: seq[string]): Opts =
   result = Opts(rest: @[], args: @[], aowli: @[], progArgs: @[], outFile: "",
                 entry: "", evalCode: "", hasEval: false, faithful: false,
-                run: false, keep: false, memory: false, timeout: 0, native: "",
+                run: false, watchAs: "", memory: false, timeout: 0, native: "",
                 showTime: true, verbose: false)
   var i = 0
   while i < argv.len:
@@ -120,7 +120,26 @@ proc parseOpts(argv: seq[string]): Opts =
       if i < argv.len: result.native = argv[i]
     elif a == "--faithful": result.faithful = true
     elif a == "--run": result.run = true
-    elif a == "--keep": result.keep = true
+    elif a.startsWith("--as:"): result.watchAs = a[5 ..< a.len]
+    elif a == "--as":
+      inc i
+      if i < argv.len: result.watchAs = argv[i]
+    elif a == "--no-cache":
+      # One mechanism, not two: the build reads the env var, so the flag sets it
+      # rather than threading a second switch down to the same decision.
+      try:
+        putEnv("AOWLMONY_NO_CACHE", "1")
+      except:
+        discard
+    elif a == "--keep":
+      # RETIRED, and said out loud rather than ignored. It used to select a
+      # `.aowlmony/` stage next to the source; the stage is keyed on the
+      # toolchain and shared now, so there is nothing for it to choose. A flag
+      # that is silently accepted and does nothing is worse than one that is
+      # gone: the user believes it took effect.
+      stderr.writeLine "  " & amber(GWarn) & " " &
+        gray("--keep is retired: the stage is keyed on the toolchain and shared " &
+             "(see `why` for what it holds)")
     elif a == "--time": result.showTime = true
     elif a == "--no-time": result.showTime = false
     elif a == "-v" or a == "--verbose": result.verbose = true
@@ -152,7 +171,7 @@ proc cmdHelp(t: Tools) =
     @["new NAME | init", "start a project (mony.toml + src/)"],
     @["fetch", "resolve deps into the store and write mony.lock"],
     @["test [ARGS]", "run the project's tests via aowltest"],
-    @["watch FILE", "rebuild whenever an input changes"],
+    @["watch FILE [--as CMD]", "re-run CMD (default run) whenever an input changes"],
     @["clean [--all]", "drop build manifests (--all: the artifacts too)"],
     @["fix FILE [--dry-run]", "apply aowlsuggest quick-fixes (cross-language habits)"],
     @["lint FILE", "aowlsuggest diagnostics only (no compile)"],
@@ -167,7 +186,7 @@ proc cmdHelp(t: Tools) =
     dim(" sem=") & cyan(t.semVariant) & dim("   one-shot: ") &
     teal("aowlmony +nimony run <file>")
   stdout.writeLine "  " & gray("options ") & GArrow & " " &
-    dim("-o  --entry  --arg  --engine  --faithful  --run  --keep  --no-time  --timeout:N  -v")
+    dim("-o  --entry  --arg  --faithful  --run  --no-cache  --no-time  --timeout:N  -v")
   stdout.writeLine "  " & gray("aowli   ") & GArrow & " " &
     dim("interp/vm/eval forward --trace[-full|-profile] --trace-depth:N, the hybrid ") &
     dim("family (--hybrid --build-native --interpret: --native-src: --native-lib:), and ") &
@@ -695,21 +714,34 @@ proc main() =
   if cmd == "watch":
     # Poll the manifest rather than the filesystem: the manifest is content, and
     # the whole point of this driver's cache is that a timestamp is not evidence.
+    #
+    # The action is carried out by re-invoking THIS binary with the command the
+    # user asked for (`--as run|interp|vm|nif|test`, default `run`), not by a
+    # second copy of the dispatch: `watch` used to be hardcoded to `interp`
+    # whatever you typed, and to throw away the exit code — which is what a
+    # duplicated decision looks like once it has drifted.
+    let action = if o.watchAs.len > 0: o.watchAs else: "run"
     stdout.writeLine "  " & gray("watching ") & cyan(tildeAbbrev(absSrc)) &
-      dim("   (ctrl-c to stop)")
+      gray(" · " & action) & dim("   (ctrl-c to stop)")
+    # A watcher that buffers its own output is a watcher that appears to do
+    # nothing: it is killed by ctrl-c, and a buffer that was never flushed dies
+    # with the process. Every line this loop prints is flushed as it is written.
+    flushFile(stdout)
+    let self = getAppFilename()
     var last = ""
+    var runs = 0
     while true:
       let now = currentManifest(t, absSrc,
                   mainHashOf(readManifest(manifestPath(stageDir(t), absSrc))))
       if now != last:
         last = now
-        let wb = build.build(file, t, false, proj, depPaths)
-        if wb.ok:
-          let rc = runInherit(t.interp, aowliArgs(wb.snif, absSrc, o, false))
-          discard rc
-          timingLine("watch", wb.compileMs, -1.0, o.showTime)
-        else:
-          reportFailure(wb, file, absSrc, t, false)
+        inc runs
+        stdout.writeLine "  " & dim(GDot) & " " & gray("#" & $runs & "  " & action)
+        flushFile(stdout)
+        let rc = runInherit(self, @[action, absSrc])
+        if rc != 0:
+          stdout.writeLine "  " & red(GCross) & " " & gray("exit " & $rc)
+        flushFile(stdout)
       discard execShellCmd("sleep 0.5")
 
   let b = build.build(file, t, o.verbose, proj, depPaths)

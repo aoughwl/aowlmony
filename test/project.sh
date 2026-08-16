@@ -62,9 +62,19 @@ fi
 
 # provenance, per module, read from the artifacts rather than from a summary line
 stage="$(NO_COLOR=1 "$NG" why src/demo.nim 2>/dev/null | sed -n 's/^  stage //p' | tail -1)"
+# ⚠️ Match THIS project's helper.nim by its own path, not by the bare module
+# name. The stage is shared across projects by design, so a scan for "helper.nim"
+# finds every helper.nim any fixture ever built — and taking the last match had
+# this gate reporting on another test's file (which, being outside a project, is
+# legitimately parsed by nifler). Same failure as findMain's "first .c.nif in the
+# nc": in a shared cache, a name is not an identity.
+# The path inside a .p.nif is written relative to the stage dir, so it ends in
+# this project's absolute path with the leading slash gone.
+here="$(pwd -P)"; needle="${here#/}/src/helper.nim"
 helper_pnif=""
-for f in "$stage"/nc/*.p.nif; do
-  head -c 400 "$f" 2>/dev/null | grep -q "helper.nim" && helper_pnif="$f"
+for f in "$stage"/nc/*.p.nif "$stage"/nc/*.p.aif; do
+  [ -f "$f" ] || continue
+  head -c 400 "$f" 2>/dev/null | tr -d '\n' | grep -qF "$needle" && helper_pnif="$f"
 done
 if [ -n "$helper_pnif" ]; then
   if head -c 200 "$helper_pnif" | grep -qE 'vendor "(aowl|aif|nif)parser"'; then
@@ -122,6 +132,42 @@ if [ "${msg:-0}" -gt 0 ]; then
 else
   bad "a git dep is reported as unresolvable, not silently dropped" \
       "nothing mentioned it; a manifest entry that does nothing is worse than an error"
+fi
+
+# --- 6. watch re-runs the command you ASKED for, and sees a change -----------
+# It used to be hardcoded to `interp` whatever you typed, and to discard the
+# exit code. Both directions are asserted: the requested action must appear, and
+# an edit must produce a SECOND run with the NEW answer — a watcher that only
+# ever runs once looks identical to a working one for the first second.
+W="$TMP/watchproj"
+mkdir -p "$W"
+cat > "$W/w.nim" <<'NIM'
+import std/syncio
+echo "first"
+NIM
+# 120 s, not 25: every `nimony c` on this machine still queues behind a
+# machine-wide lock, so a rebuild here can wait on an unrelated project's
+# compile. The gate must fail on "watch did not react", never on "the box was
+# busy" — see the nimcache_static work.
+( cd "$W" && NO_COLOR=1 timeout 120 "$NG" watch "$W/w.nim" --as interp > "$W/out.log" 2>&1 ) &
+watch_pid=$!
+for _ in $(seq 1 120); do grep -q "first" "$W/out.log" 2>/dev/null && break; sleep 0.5; done
+cat > "$W/w.nim" <<'NIM'
+import std/syncio
+echo "second"
+NIM
+for _ in $(seq 1 120); do grep -q "second" "$W/out.log" 2>/dev/null && break; sleep 0.5; done
+kill "$watch_pid" 2>/dev/null; wait "$watch_pid" 2>/dev/null
+if grep -q "first" "$W/out.log" && grep -q "second" "$W/out.log"; then
+  ok "watch re-runs on a change and prints the new answer"
+else
+  bad "watch re-runs on a change and prints the new answer" \
+      "log: $(tr '\n' '|' < "$W/out.log" | tail -c 200)"
+fi
+if grep -q "· interp" "$W/out.log"; then
+  ok "watch honours --as (it used to be hardcoded to interp whatever you asked)"
+else
+  bad "watch honours --as" "no action banner in the log"
 fi
 
 echo ""

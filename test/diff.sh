@@ -37,6 +37,27 @@ cat > "$FIX/broken.nim" <<'NIM'
 import std/syncio
 echo undefinedThing
 NIM
+# A real dangling pointer, so `verify --memory` is diffed on a FINDING and not
+# only on a clean verdict — the two print through completely different code.
+cat > "$FIX/dangle.nim" <<'NIM'
+import std/syncio
+
+type Buf = object
+  data: string
+
+proc use(p: ptr Buf) =
+  echo "use: ", p.data
+
+proc main() =
+  var p: ptr Buf
+  block:
+    var b = Buf(data: "hello")
+    p = addr b
+    use(p)
+  use(p)
+
+main()
+NIM
 
 norm() {
   sed -E \
@@ -47,6 +68,7 @@ norm() {
     -e 's#main module [a-z][a-z0-9]+#main module <HASH>#g' \
     -e 's#compiled [0-9.]+m?s#compiled <T>#g' \
     -e 's#ran [0-9.]+m?s#ran <T>#g' \
+    -e 's#[0-9]+ traced ops?#<N> traced ops#g' \
     "$1"
 }
 
@@ -84,6 +106,8 @@ CASES=(
   "js FIX/hello.nim"
   "py FIX/hello.nim"
   "ts FIX/hello.nim --run"
+  "verify FIX/hello.nim --memory"
+  "verify FIX/dangle.nim --memory"
 )
 
 pass=0; fail=0; expected=0

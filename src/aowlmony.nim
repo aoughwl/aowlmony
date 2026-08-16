@@ -10,7 +10,7 @@
 
 import std/[syncio, strutils, envvars, cmdline, os, monotimes, json]
 import aowlkit/[subprocess, tty]
-import aowlmony/[tools, stage, build, diag, project, pkg, verify]
+import aowlmony/[tools, stage, build, diag, project, pkg, verify, memory]
 
 const Prog = "aowlmony"
 
@@ -164,7 +164,7 @@ proc cmdHelp(t: Tools) =
     @["ts|js FILE [--faithful]", "emit idiomatic TypeScript / JavaScript"],
     @["py FILE", "emit idiomatic Python"],
     @["verify FILE", "run native + interpreted, report the first divergent op"],
-    @["verify FILE --memory", "trap dangling pointers under --fin (JS driver only, for now)"],
+    @["verify FILE --memory", "trap dangling pointers under --fin: allocation site + use site"],
     @["parse FILE", "show OUR .p.nif"],
     @["nif FILE", "compile only; print .s/.c.nif paths"],
     @["why FILE", "say which input changed, and what it forced to rebuild"],
@@ -848,9 +848,139 @@ proc main() =
     timingLine(cmd, b.compileMs, -1.0, o.showTime)
   of "verify":
     if o.memory:
-      # A DIFFERENT question: a static dangling-pointer analysis over the NIF,
-      # witnessed against a --fin run. Not ported; the JS driver answers it.
-      fail("'verify --memory' is not in the nimony build yet — use the JS driver for it", 3)
+      # A DIFFERENT question from the differential above: a dangling-pointer
+      # analysis over the artifact, witnessed against a `--fin` run.
+      let timeoutM = if o.timeout > 0: o.timeout else: 30
+      var art = ""
+      try:
+        art = readFile(b.snif)
+      except:
+        fail("cannot read " & b.snif)
+      let mr = memoryFindings(art, absSrc, b.stage)
+      var findings = mr.findings
+      let st = mr.stats
+
+      # The witness run. `--fin` is forced: without it the destroyer never runs
+      # and the question this command asks is not even posed.
+      var finArgs: seq[string] = @["--fin", "--trace"]
+      for a in aowliArgs(b.snif, absSrc, o, false):
+        if not a.startsWith("--trace") and a != "--fin": finArgs.add a
+      let traced = runCap(t.interp, finArgs, timeoutM)
+      let tr = parseTrace(traced.errText)
+      let ranFin = tr.ops.len > 0
+      if traced.timedOut:
+        stderr.writeLine "  " & amber("!") & " " & gray("the --fin run hit the " &
+          $timeoutM & "s timeout; findings below are static only")
+      if tr.truncated:
+        stderr.writeLine "  " & amber("!") & " " & gray("aowli truncated the trace " &
+          "at its cap; witnesses past that point are unavailable")
+
+      let base = baseNameOf(absSrc)
+      var confirmed = 0
+      if ranFin and not traced.timedOut:
+        var k = 0
+        while k < findings.len:
+          witnessFinding(findings[k], tr.ops, base)
+          if findings[k].confirmed: inc confirmed
+          inc k
+
+      stderr.writeLine ""
+      if findings.len == 0:
+        # ⚠️ "clean" and "the walk never reached your code" must not print the
+        # same line, so the verdict carries what was examined.
+        let nothingToCheck = st.sites == 0
+        let head = if nothingToCheck: amber(GOk) else: green(GOk)
+        let word = if nothingToCheck: amber("verify --memory") else: green("verify --memory")
+        stderr.writeLine "  " & head & " " & bold(word) & " " & gray(GBar) & " " &
+          gray(if nothingToCheck: "nothing to check — " & file & " takes no addresses"
+               else: "no pointer outlives the storage it names")
+        stderr.writeLine "    " & dim($st.sites & " address-taking site" &
+          (if st.sites == 1: "" else: "s") & " · " & $st.tracked &
+          " bound to a named pointer and tracked across " & $st.scopes & " scope" &
+          (if st.scopes == 1: "" else: "s"))
+        if st.sites > st.tracked:
+          let n = st.sites - st.tracked
+          stderr.writeLine "    " & gray("note: " & $n &
+            (if n == 1: " address flows" else: " addresses flow") &
+            " straight into a call rather than into a variable; this analysis is " &
+            "intraprocedural and does not follow them into the callee")
+        if not ranFin:
+          stderr.writeLine "    " & amber("!") & " " & gray("the --fin run produced no " &
+            "trace, so this is a static result only — nothing witnessed a destructor running")
+        stderr.writeLine "    " & dim("front end " &
+          (if b.byOurParser: "aowlparser" else: "nifler") & "→sem→" &
+          (if b.usedHexer: "aowlhexer" else: "hexer") & " · witness " &
+          baseNameOf(t.interp) & " --fin " & dayOf(t.interp) & " · " & $tr.ops.len & " traced op" &
+          (if tr.ops.len == 1: "" else: "s"))
+        stderr.writeLine ""
+        quit 0
+
+      stderr.writeLine "  " & red(GCross) & " " & bold(red("verify --memory")) & " " &
+        gray(GBar) & " " & gray($findings.len &
+          (if findings.len == 1: " defect, " else: " defects, ")) &
+        (if confirmed > 0: red($confirmed & " confirmed under --fin")
+         else: amber("none reached on this run"))
+      stderr.writeLine ""
+
+      for f in findings:
+        let who = if f.routine.len > 0: "`" & f.routine & "`" else: "the routine"
+        let title = if f.isEscape:
+                      "the address of the local `" & f.target & "` outlives " & who
+                    else:
+                      "`" & f.ptrName & "` is used after the storage it points at was destroyed"
+        stderr.writeLine "  " & bold(if f.isEscape: "escaping address" else: "use after free") &
+          "   " & gray(title)
+        stderr.writeLine "    " & cyan("allocated ") & gray(GArrow) & " " & file & ":" &
+          $f.alloc.line & ":" & $(f.alloc.col + 1) &
+          dim("   `" & f.target & "` is declared here")
+        if f.isEscape:
+          stderr.writeLine "    " & red("escapes   ") & gray(GArrow) & " " & file & ":" &
+            $f.use.line & ":" & $(f.use.col + 1) &
+            dim("   its address is returned from " & who) &
+            (if f.confirmed: dim(" — " & f.routine & " ran on this run") else: "")
+          stderr.writeLine "    " & violet("freed     ") & gray(GArrow) &
+            dim(" as " & who & " returns — every caller's copy of the pointer is " &
+                "dangling from that moment")
+        else:
+          let openedLine = if f.hasOpened: f.opened.line else: f.freeAt.line
+          stderr.writeLine "    " & violet("freed     ") & gray(GArrow) & " " & file & ":" &
+            $f.freeAt.line & dim("   end of the scope opened at " & file & ":" & $openedLine) &
+            (if f.destroyed: dim(" — =destroy witnessed here") else: "")
+          stderr.writeLine "    " & red("used      ") & gray(GArrow) & " " & file & ":" &
+            $f.use.line & ":" & $(f.use.col + 1) &
+            (if f.reachedUse: dim("   executed on this run") else: "")
+        stderr.writeLine ""
+
+        let note =
+          if not ranFin:
+            "static only: the --fin witness run produced no trace"
+          elif f.isEscape:
+            if f.confirmed:
+              "confirmed: " & who & " ran under --fin, so a dangling pointer really was handed out"
+            else:
+              who & " was not called on this run, so nothing witnessed the escape — " &
+                "the analysis is structural"
+          elif f.confirmed:
+            "confirmed: the --fin run destroyed `" & f.target & "` and then reached this line"
+          elif f.destroyed:
+            "the destructor ran, but this line was not reached on this run — the defect " &
+              "is real, the path is not exercised by the program's default input"
+          else:
+            "this run neither destroyed `" & f.target & "` nor reached this line; the " &
+              "analysis is structural and the path was not taken"
+        renderDiag(Diagnostic(file: file, line: f.use.line, col: f.use.col + 1,
+          endCol: f.use.col + 1 + f.ptrName.len,
+          severity: (if f.confirmed: "error" else: "warning"), code: "",
+          message: title, helps: @[Help(kind: "note", text: note)]), absSrc, file)
+        stderr.writeLine ""
+
+      stderr.writeLine "    " & dim("front end " &
+        (if b.byOurParser: "aowlparser" else: "nifler") & "→sem→" &
+        (if b.usedHexer: "aowlhexer" else: "hexer") & " · witness " &
+        baseNameOf(t.interp) & " --fin " & dayOf(t.interp) & " · " & $tr.ops.len & " traced op" &
+        (if tr.ops.len == 1: "" else: "s"))
+      stderr.writeLine ""
+      quit 1
     let timeoutS = if o.timeout > 0: o.timeout else: 30
     let which = if o.native.len > 0: o.native else: "nimony"
     if which != "nimony" and which != "aowlc":
@@ -959,7 +1089,7 @@ proc main() =
               "` runs with no user frame above it (a top-level echo expands to " &
               "write(stdout,…) inside system), so this is the last op the interpreter " &
               "ran at a line in your module — `" & loc.callee & "`")
-          renderDiag(Diagnostic(file: file, line: loc.line, col: loc.col,
+          renderDiag(Diagnostic(file: file, line: loc.line, col: loc.col, endCol: loc.endCol,
             severity: "error", code: "",
             message: "native and interpreted disagree here", helps: helps), absSrc, file)
         else:

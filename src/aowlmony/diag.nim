@@ -18,6 +18,7 @@ type
     file*: string
     line*: int
     col*: int
+    endCol*: int        ## 1-based, inclusive; 0 when the producer gave none
     severity*: string   ## error | warning | hint
     code*: string       ## "" when the front end gave none
     message*: string
@@ -116,7 +117,7 @@ proc parseInt0(s: string): int =
 
 proc parseNimonyLine(raw: string): (bool, Diagnostic) =
   ## path(line, col) Severity: message
-  var d = Diagnostic(file: "", line: 0, col: 0, severity: "", code: "",
+  var d = Diagnostic(file: "", line: 0, col: 0, endCol: 0, severity: "", code: "",
                      message: "", helps: @[])
   let s = strip(raw)
   let open = find(s, '(')
@@ -145,7 +146,7 @@ proc parseNimonyLine(raw: string): (bool, Diagnostic) =
 
 proc parseOursLine(raw: string): (bool, Diagnostic) =
   ## file:line:col: severity[code]: message
-  var d = Diagnostic(file: "", line: 0, col: 0, severity: "", code: "",
+  var d = Diagnostic(file: "", line: 0, col: 0, endCol: 0, severity: "", code: "",
                      message: "", helps: @[])
   let s = strip(raw)
   # walk from the right so a path containing ':' still splits correctly
@@ -229,8 +230,9 @@ proc severityColor(sev, s: string): string =
   else: red(s)
 
 proc caretSpan(d: Diagnostic, line: string): int =
-  ## The identifier starting at the column, so the underline covers the token
-  ## rather than a single character.
+  ## The span the producer asked for, else the identifier starting at the
+  ## column, so the underline covers the token rather than one character.
+  if d.endCol > 0 and d.endCol >= d.col: return d.endCol - d.col + 1
   var n = 0
   var i = d.col - 1
   while i >= 0 and i < line.len:

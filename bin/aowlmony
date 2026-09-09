@@ -335,6 +335,15 @@ function parseArgs(argv) {
     // file's directory (a game mod against its SDK) cannot be compiled without
     // them, and a build tool that already knows them must be able to say so.
     else if (/^(-p|--path):/.test(a)) (o.paths = o.paths || []).push(a.slice(a.indexOf(":") + 1));
+    // Conditional-compilation symbols, handed to nimony as its own `-d:` and,
+    // through the nimsem shim, to aowlsem — which resolves the import graph AND
+    // folds every `when` itself, so a define it never sees makes it take the
+    // other branch from the one the backend then compiles.
+    // lib/std/system/mimalloc.nim guards its `.compile` on
+    // `defined(release) or defined(danger)`: without this, a release build
+    // links the debug allocator and the `-d:release` half of that `when` is
+    // unreachable through this driver at all.
+    else if (/^(-d|--d|--define):/.test(a)) (o.defines = o.defines || []).push(a.slice(a.indexOf(":") + 1));
     else if (AOWLI_PASS(a)) o.aowli.push(a);
     else o._.push(a);
   }
@@ -576,7 +585,7 @@ NIMSEM=${JSON.stringify(t.nimsemReal)}
 LIB=${JSON.stringify(libDir)}
 DBG="\${AOWLMONY_SEM_DEBUG:-}"
 [ -n "$DBG" ] && { echo "=== shim raw argv ($#): $*"; echo "cwd=$(pwd)"; } >> /tmp/shimtrace.log
-mode=""; nc=""; issystem=0; seen_cmd=0; files=(); paths=()
+mode=""; nc=""; issystem=0; seen_cmd=0; files=(); paths=(); defs=()
 # NOT the --base: nimony passes. nifler spells line-info file names relative to
 # its own CWD and nimsem reads them back with absolutePath(), so that round trip
 # closes wherever the compiler runs; aowlsem instead anchors them to --base:,
@@ -598,6 +607,10 @@ for a in "$@"; do
       # import graph itself, so it needs every one of them, not just the stdlib
       --path:*|-p:*) paths+=("$a") ;;
       --p:*) paths+=("-p:\${a#--p:}") ;;   # nimony re-dashes a -p: it was given
+      # …and the same for -d:. aowlsem folds every when itself, so a define it
+      # does not receive is a branch it decides differently from the backend.
+      -d:*|--define:*) defs+=("$a") ;;
+      --d:*) defs+=("-d:\${a#--d:}") ;;
       m) mode=m; seen_cmd=1 ;;
       x) mode=x; seen_cmd=1 ;;
       e|idetools) mode=other; seen_cmd=1 ;;
@@ -622,6 +635,7 @@ sargs=(m "$in" "$out")
 [ -n "$nc" ] && sargs+=("$nc")
 sargs+=("-p:$LIB")
 [ "\${#paths[@]}" -gt 0 ] && sargs+=("\${paths[@]}")
+[ "\${#defs[@]}" -gt 0 ] && sargs+=("\${defs[@]}")
 [ "$issystem" = 1 ] && sargs+=("--noSystem")
 [ -n "$DBG" ] && echo "aowlsem-shim: aowlsem \${sargs[*]}" >&2
 if [ -n "$DBG" ]; then
@@ -830,10 +844,14 @@ function compile(nimFile, o, t) {
   // different `-p:` set resolves different modules, and sharing a stage would
   // serve one set's artifacts to the other.
   const pathFlags = (o.paths || []).map((p) => "-p:" + path.resolve(p));
+  // …and the defines, for exactly the same reason: `-d:release` and the
+  // default are two different programs out of one source, and one stage
+  // between them would serve one's artifacts to the other.
+  const defineFlags = (o.defines || []).map((d) => "-d:" + d);
   const key = require("crypto").createHash("sha1")
     .update([abs, t.parserVariant, t.hexerVariant, t.semVariant,
              ran(useOurParser, t.nifparser), ran(useAifhexer, t.aifhexer),
-             ran(semUse(), t.aowlsem), ...pathFlags].join("\0"))
+             ran(semUse(), t.aowlsem), ...pathFlags, ...defineFlags].join("\0"))
     .digest("hex").slice(0, 12);
   const stage = o.out && o.keep ? path.join(path.dirname(abs), ".aowlmony")
     : path.join(os.tmpdir(), "aowlmony-cache", key);
@@ -911,7 +929,7 @@ function compile(nimFile, o, t) {
   // shebang. On POSIX the script is directly executable and nothing changes.
   const lockArgv = process.platform === "win32" ? ["bash", nimlock] : [nimlock];
   const _t0 = process.hrtime.bigint();
-  const nimonyArgv = ["c", "--nimcache:" + nc, ...pathFlags, abs];
+  const nimonyArgv = ["c", "--nimcache:" + nc, ...pathFlags, ...defineFlags, abs];
   const r = locked
     ? cp.spawnSync(lockArgv[0], [...lockArgv.slice(1), t.nimony, ...nimonyArgv],
         { cwd: stage, env, encoding: "utf8" })

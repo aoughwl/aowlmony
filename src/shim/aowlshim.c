@@ -359,10 +359,10 @@ static int roleNimsem(int argc, char **argv) {
   const char *base = NULL, *nc = NULL, *in;
   char mode = 0;
   int seenCmd = 0, isSystem = 0, nFiles = 0, ns = 0, rc, i;
-  char *files[MAXARG], *sa[MAXARG], *xa[2], *paths[MAXARG];
+  char *files[MAXARG], *sa[MAXARG], *xa[2], *paths[MAXARG], *defs[MAXARG];
   char out[4096], pflag[4096];
   size_t n, sl;
-  int nPaths = 0;
+  int nPaths = 0, nDefs = 0;
 
   if (!*real) die("AOWLSHIM_NIMSEM is not set");
 
@@ -377,6 +377,16 @@ static int roleNimsem(int argc, char **argv) {
          find it. */
       else if (strncmp(a, "--path:", 7) == 0 || strncmp(a, "-p:", 3) == 0) {
         if (nPaths < MAXARG) paths[nPaths++] = a;
+      }
+      /* …and the same for `-d:`, which nimony re-dashes the same way.  aowlsem
+         folds every `when` itself, so a define it does not receive is a branch
+         it decides differently from the backend that compiles the result -
+         lib/std/system/mimalloc.nim guards its `.compile` on
+         `defined(release) or defined(danger)`. */
+      else if (strncmp(a, "-d:", 3) == 0 || strncmp(a, "--d:", 4) == 0 ||
+               strncmp(a, "--define:", 9) == 0) {
+        if (strncmp(a, "--d:", 4) == 0) a = a + 1;
+        if (nDefs < MAXARG) defs[nDefs++] = a;
       }
       else if (strcmp(a, "m") == 0) { mode = 'm'; seenCmd = 1; }
       else if (strcmp(a, "x") == 0) { mode = 'x'; seenCmd = 1; }
@@ -414,6 +424,7 @@ static int roleNimsem(int argc, char **argv) {
   if (nc) sa[ns++] = (char *)nc;
   sa[ns++] = pflag;
   for (i = 0; i < nPaths && ns < MAXARG - 2; i++) sa[ns++] = paths[i];
+  for (i = 0; i < nDefs && ns < MAXARG - 2; i++) sa[ns++] = defs[i];
   if (isSystem) sa[ns++] = (char *)"--noSystem";
 
   trace("nimsem: -> aowlsem m %s %s", in, out);

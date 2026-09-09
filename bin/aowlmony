@@ -729,12 +729,21 @@ function compile(nimFile, o, t) {
   const locked = fs.existsSync(nimlock);
   if (!locked) log(o, "nimlock not found — compiling unlocked; a concurrent nimony " +
     "on this machine can fail the link with a missing static.o");
+  // nimlock is a #! script, and Windows CreateProcess cannot exec one: spawning
+  // it directly fails with ENOENT and — because spawnSync reports that in
+  // `error`, not in `stderr` — the compile looked like it produced no
+  // diagnostics at all. Measured 2026-09-09: with nimlock installed, EVERY
+  // build on this machine failed with an empty error report; with it absent,
+  // the same build succeeded. Go through bash there, which is what resolves a
+  // shebang. On POSIX the script is directly executable and nothing changes.
+  const lockArgv = process.platform === "win32" ? ["bash", nimlock] : [nimlock];
   const _t0 = process.hrtime.bigint();
   const r = locked
-    ? cp.spawnSync(nimlock, [t.nimony, "c", "--nimcache:" + nc, abs],
+    ? cp.spawnSync(lockArgv[0], [...lockArgv.slice(1), t.nimony, "c", "--nimcache:" + nc, abs],
         { cwd: stage, env, encoding: "utf8" })
     : cp.spawnSync(t.nimony, ["c", "--nimcache:" + nc, abs],
         { cwd: stage, env, encoding: "utf8" });
+  if (r.error) log(o, "nimony could not be launched: " + r.error.message);
   const compileMs = Number(process.hrtime.bigint() - _t0) / 1e6;
   if (o.verbose && r.stderr) process.stderr.write(r.stderr);
 

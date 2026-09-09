@@ -2,9 +2,11 @@
 ##
 ## The whole pipeline is achieved by ONE subprocess — `nimony c` — plus PATH
 ## shims. nimony resolves `nifler`, `hexer` and `nimsem` through a findTool that
-## checks the cwd first and then bare names on PATH, so staging executables with
-## those names and running the compiler from the stage dir substitutes our
-## implementations without the compiler knowing.
+## appends the platform's ExeExt and checks the cwd first, so staging executables
+## under those names and running the compiler from the stage dir substitutes our
+## implementations without the compiler knowing. The suffix is the catch: on
+## Windows only `<name>.exe` is ever looked at, so a shim has to BE one — which a
+## pure passthrough can (stage the binary) and a routing script cannot.
 ##
 ## The cwd matters for a second reason: a module's cache identity is a hash of
 ## its path relative to the compiler's CWD, so the stage dir must be stable or
@@ -152,6 +154,46 @@ proc removeIfPresent(path: string) =
   if tools.fileExists(path):
     discard execShellCmd("rm -f " & quoteShell(path))
 
+# nimony's findTool() appends the platform ExeExt and looks in the CWD — the
+# stage dir — before its own bin/. On POSIX ExeExt is "" and a shim script named
+# `hexer` is exactly what it tests; on Windows the only spelling it ever tests is
+# `hexer.exe`, and Windows will not exec a script under that name. A
+# script-shaped shim there is not found-and-failed, it is never looked at.
+#
+# The hexer shim is a pure passthrough, so it does not have to be a script:
+# stage the binary itself, under the name nimony looks for. The nifler and nimsem
+# shims carry routing logic and cannot be replaced by a copy.
+const ShimScriptsRun* = not defined(windows)
+proc shimPath(stageDir, name: string): string = stageDir & "/" & name & ExeSuffix
+
+proc stageHexer(stageDir, exe: string) =
+  if ShimScriptsRun:
+    writeShim(stageDir & "/hexer",
+      "#!/usr/bin/env bash\nexec " & shellQuoteJson(exe) & " \"$@\"\n")
+    return
+  let dst = shimPath(stageDir, "hexer")
+  # Copy through the file API rather than shelling out to `cp`, which is not a
+  # command Windows has. Re-copied only when the source build changed.
+  var src = ""
+  try:
+    src = readFile(exe)
+  except:
+    return
+  var cur = ""
+  try:
+    cur = readFile(dst)
+  except:
+    cur = ""
+  if cur != src:
+    try:
+      writeFile(dst, src)
+    except:
+      discard
+
+proc clearShim(stageDir, name: string) =
+  removeIfPresent(stageDir & "/" & name)
+  if ExeSuffix.len > 0: removeIfPresent(shimPath(stageDir, name))
+
 proc repoRootOf(nimony: string): string =
   ## <nimony repo>, from <repo>/bin/nimony
   var cuts = 0
@@ -290,24 +332,27 @@ proc build*(entry: string, t: Tools, verbose = false,
   # Shims are rewritten every invocation, and a shim for a DESELECTED variant is
   # removed — a stale one lingering in a shared stage would silently keep using
   # the implementation the profile just switched away from.
-  let useParser = t.parserVariant == "aowlparser" and t.nifparser.len > 0
+  # The parser and sem shims are scripts (they route user modules vs stdlib, and
+  # translate nimsem's m/x argv), so on Windows nimony never looks at them — see
+  # ShimScriptsRun. Selecting them there would stage a dead file and report a
+  # component that did not run.
+  let useParser = t.parserVariant == "aowlparser" and t.nifparser.len > 0 and
+                  ShimScriptsRun
   if useParser: writeShim(st & "/nifler", parserShim(t))
-  else: removeIfPresent(st & "/nifler")
+  else: clearShim(st, "nifler")
 
   let useHexer = t.hexerVariant == "aowlhexer" and t.hexer.len > 0 and
                  tools.fileExists(t.hexer) and getEnv("AOWLMONY_NO_AOWLHEXER", "").len == 0
-  if useHexer:
-    writeShim(st & "/hexer", "#!/usr/bin/env bash\nexec " &
-      shellQuoteJson(t.hexer) & " \"$@\"\n")
-  else: removeIfPresent(st & "/hexer")
+  if useHexer: stageHexer(st, t.hexer)
+  else: clearShim(st, "hexer")
   result.usedHexer = useHexer
 
-  let useSem = t.semVariant == "aowlsem" and t.aowlsem.len > 0 and
+  let useSem = t.semVariant == "aowlsem" and t.aowlsem.len > 0 and ShimScriptsRun and
                tools.fileExists(t.aowlsem) and getEnv("AOWLMONY_NO_AOWLSEM", "").len == 0
   if useSem:
     let root = repoRootOf(t.nimony)
     writeShim(st & "/nimsem", semShim(t, root & "/lib", root & "/src/lib", st))
-  else: removeIfPresent(st & "/nimsem")
+  else: clearShim(st, "nimsem")
   result.usedSem = useSem
 
   # Content freshness over the whole user closure, not just the entry file.
@@ -362,7 +407,8 @@ proc build*(entry: string, t: Tools, verbose = false,
       if stemName[q] == '/': s2 = q
       inc q
     if s2 >= 0: stemName = stemName[s2 + 1 ..< stemName.len]
-    stderr.writeLine "  " & dim(GDot) & " " & gray("nifparser parses " & stemName & "; " &
+    stderr.writeLine "  " & dim(GDot) & " " & gray(
+      (if useParser: "nifparser parses " else: "nimony nifler parses ") & stemName & "; " &
       (if useSem: "sem via aowlsem (ours)" else: "sem via nimony nimsem;") & " " &
       (if useHexer: "lowering via aowlhexer (ours)" else: "lowering via nimony hexer"))
 

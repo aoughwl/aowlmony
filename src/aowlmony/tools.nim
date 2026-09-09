@@ -53,12 +53,29 @@ proc allPrefixes*(name: string): seq[string] =
   else:
     @[name]
 
+const ExeSuffix* = when defined(windows): ".exe" else: ""
+
+proc resolveExe*(p: string): string =
+  ## The spelling of `p` that exists on disk, "" if none.
+  ##
+  ## Every candidate in this module is written without an executable suffix,
+  ## because that is the name the binary has on Linux and macOS. On Windows every
+  ## aoughwl binary is `<tool>.exe`, so a bare-name probe misses ALL of them: the
+  ## driver then reports `parser=aowlparser hexer=aowlhexer` while running end to
+  ## end on nimony. Off Windows ExeSuffix is "" and this is just `fileExists`.
+  if p.len == 0: return ""
+  if fileExists(p): return p
+  when defined(windows):
+    if not p.endsWith(ExeSuffix) and fileExists(p & ExeSuffix): return p & ExeSuffix
+  ""
+
 proc firstExisting*(cands: seq[string]): string =
   ## "" when nothing exists — NOT the last candidate. A resolver that invents a
   ## plausible path turns "you have not built this" into a confusing failure
   ## much further downstream.
   for c in cands:
-    if c.len > 0 and fileExists(c): return c
+    let hit = resolveExe(c)
+    if hit.len > 0: return hit
   ""
 
 proc repoBin*(base: string, suffix = ""): seq[string] =

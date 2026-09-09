@@ -286,6 +286,47 @@ function parseArgs(argv) {
 
 // The nifler-compatible shim: OUR aowlparser for the user module(s) in
 // $NIFRW_USER; the real nifler for the stdlib and the --deps import sidecar.
+// How nimony finds a staged shim, and what that costs on Windows.
+//
+// `findTool(name)` (nimony src/lib/tooldirs.nim) appends the platform's ExeExt
+// and looks for the result in the CWD — we run the compiler with cwd=stage —
+// before falling back to its own bin/. On POSIX ExeExt is "" and a shim script
+// named `hexer` is exactly what it looks for. On Windows the ONLY spelling it
+// ever tests is `hexer.exe`, and Windows will not exec a shell script under that
+// name however it is spelled — so a script-shaped shim there is not "found and
+// failed", it is never looked at.
+//
+// The hexer shim is a pure passthrough — `exec aowlhexer "$@"` — so it does not
+// have to be a script. Stage the binary itself, under the name nimony looks for.
+// The nifler and nimsem shims carry routing logic (user module vs stdlib; the
+// nimsem `m`/`x` argv translation) and cannot be replaced by a copy; see
+// SHIM_SCRIPTS_RUN.
+const SHIM_SCRIPTS_RUN = process.platform !== "win32";
+const shimName = (n) => n + (process.platform === "win32" ? ".exe" : "");
+function clearShim(stage, name) {
+  for (const n of [name, shimName(name)]) {
+    const p = path.join(stage, n);
+    if (fs.existsSync(p)) fs.rmSync(p);
+  }
+}
+function stageHexer(stage, exe) {
+  const dst = path.join(stage, shimName("hexer"));
+  if (SHIM_SCRIPTS_RUN) {
+    fs.writeFileSync(dst, "#!/usr/bin/env bash\nexec " + JSON.stringify(exe) + " \"$@\"\n");
+    fs.chmodSync(dst, 0o755);
+    return;
+  }
+  // A copy, not a link: a symlink needs a privilege the driver has no business
+  // requiring. Re-copied only when the source build changed, so a warm cache
+  // pays nothing and a rebuilt aowlhexer is still picked up.
+  let src; try { src = fs.statSync(exe); } catch (_) { return; }
+  let cur = null; try { cur = fs.statSync(dst); } catch (_) {}
+  if (!cur || cur.size !== src.size || cur.mtimeMs < src.mtimeMs) {
+    fs.copyFileSync(exe, dst);
+    try { fs.utimesSync(dst, new Date(src.mtimeMs), new Date(src.mtimeMs)); } catch (_) {}
+  }
+}
+
 function shimScript(t) {
   return `#!/usr/bin/env bash
 REAL_NIFLER=${JSON.stringify(t.niflerReal)}
@@ -555,13 +596,8 @@ function compile(nimFile, o, t) {
   // AOWLMONY_NO_AOWLHEXER=1 forces nimony's hexer regardless.
   const wantAifhexer = (t.hexerVariant || "aowlhexer") === "aowlhexer";
   const useAifhexer = wantAifhexer && t.aifhexer && fs.existsSync(t.aifhexer) && !(process.env.AOWLMONY_NO_AOWLHEXER || process.env.AOWLMONY_NO_AOWLHEXER);
-  const hexerShim = path.join(stage, "hexer");
-  if (useAifhexer) {
-    fs.writeFileSync(hexerShim, "#!/usr/bin/env bash\nexec " + JSON.stringify(t.aifhexer) + " \"$@\"\n");
-    fs.chmodSync(hexerShim, 0o755);
-  } else if (fs.existsSync(hexerShim)) {
-    fs.rmSync(hexerShim);   // ensure a stale shim doesn't linger in the cache
-  }
+  if (useAifhexer) stageHexer(stage, t.aifhexer);
+  else clearShim(stage, "hexer");   // no stale shim left lingering in the cache
   o._usedAifhexer = useAifhexer;
   // Stage a `nimsem` shim → aowlsem so nimony's build (findTool("nimsem")) uses
   // OUR semantic checker — only when the profile selects the aowlsem variant.

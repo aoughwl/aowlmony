@@ -139,9 +139,27 @@ function timingLine(label, compileMs, runMs, o) {
 // candidate order and results are unchanged.
 const EXE = process.platform === "win32" ? ".exe" : "";
 function exeVariants(c) { return EXE && !c.endsWith(EXE) ? [c, c + EXE] : [c]; }
+// A miss records what it looked at, keyed by the placeholder path it hands back,
+// so the warning for a slot that fell back can NAME the paths tried instead of
+// asserting that a binary "was not found" and leaving the user to guess where it
+// was expected. Nothing else reads this; it exists to make a miss legible.
+const PROBE_TRIED = new Map();
+function triedPaths(resolved) { return PROBE_TRIED.get(resolved) || []; }
 function firstExisting(cands) {
   for (const c of cands) if (c) for (const v of exeVariants(c)) if (fs.existsSync(v)) return v;
-  return cands[cands.length - 1];
+  const last = cands[cands.length - 1];
+  PROBE_TRIED.set(last, cands.filter(Boolean));
+  return last;
+}
+// "…, or set AOWLMONY_X=…" plus the candidate list, wrapped one per line. Only
+// the paths actually probed — the driver does not guess at repo-name variants
+// (`~/aowlsem.ghfresh`, a worktree, a clone): picking one build out of several
+// spellings and calling it authoritative is a worse failure than a clean miss.
+// Point the env var at the build you mean, or let aowlup select it.
+function triedNote(resolved) {
+  const tried = triedPaths(resolved);
+  if (!tried.length) return "";
+  return "\n" + tried.map((p) => "      " + C.gray("tried ") + C.dim(p) + C.dim(EXE ? " (+" + EXE + ")" : "")).join("\n");
 }
 // The ecosystem is rebranding nif* → aif* → aowl* (aowl intermediate format),
 // and a sibling session may be mid-rename/rebuild (repo dir and binary can even
@@ -286,6 +304,37 @@ function parseArgs(argv) {
 
 // The nifler-compatible shim: OUR aowlparser for the user module(s) in
 // $NIFRW_USER; the real nifler for the stdlib and the --deps import sidecar.
+// Say, once per run, which of OUR components the profile selected and will not
+// get — and why, and where we looked. A profile that silently degrades to nimony
+// is the whole defect this file has been carrying; "sem=aowlsem" in the status
+// line while nimsem does the work is not a cosmetic problem.
+//
+// Only the three swappable slots are reported. A missing aowlts/aowli/etc. is
+// already a hard error at the point of use, which is the right place for it.
+function warnFallbacks(t) {
+  const warn = (slot, variant, reason, resolved) =>
+    console.error("  " + C.amber("!") + " " + C.gray("profile selects ") +
+      C.cyan(slot + "=" + variant) + C.gray(", but ") + reason +
+      C.gray(" — using nimony's") + (resolved ? triedNote(resolved) : ""));
+  const missing = (p) => !p || !fs.existsSync(p);
+  const noScript = C.gray("this platform cannot run the ") + C.dim("nifler") +
+    C.gray("/") + C.dim("nimsem") + C.gray(" shim: nimony resolves a tool as ") +
+    C.dim("<name>" + EXE) + C.gray(", and a shell script cannot carry that name");
+
+  if ((t.parserVariant || "aowlparser") === "aowlparser") {
+    if (missing(t.nifparser))
+      warn("parser", "aowlparser", C.gray("the aowlparser binary was not found (set AOWLMONY_NIFPARSER, or let aowlup select it)"), t.nifparser);
+    else if (!SHIM_SCRIPTS_RUN) warn("parser", "aowlparser", noScript);
+  }
+  if (t.semVariant === "aowlsem") {
+    if (missing(t.aowlsem))
+      warn("sem", "aowlsem", C.gray("the aowlsem binary was not found (set AOWLMONY_AOWLSEM, or let aowlup select it)"), t.aowlsem);
+    else if (!SHIM_SCRIPTS_RUN) warn("sem", "aowlsem", noScript);
+  }
+  if ((t.hexerVariant || "aowlhexer") === "aowlhexer" && missing(t.aifhexer))
+    warn("hexer", "aowlhexer", C.gray("the aowlhexer binary was not found (set AOWLMONY_HEXER, or let aowlup select it)"), t.aifhexer);
+}
+
 // How nimony finds a staged shim, and what that costs on Windows.
 //
 // `findTool(name)` (nimony src/lib/tooldirs.nim) appends the platform's ExeExt
@@ -587,10 +636,15 @@ function compile(nimFile, o, t) {
   // parser: inject OUR aowlparser (via the nifler shim) only when the active
   // profile selects the aowlparser variant; otherwise let nimony's own nifler
   // parse everything (the `nimony` profile / `aowl use parser nifler`).
-  const useOurParser = (t.parserVariant || "aowlparser") === "aowlparser";
+  // …and only when the shim can actually be reached: it routes user modules to
+  // aowlparser and the stdlib to the real nifler, so it has to be a script, and
+  // a script is not a name nimony's findTool will ever test on Windows. Writing
+  // it anyway would only produce a dead file and a status line that lies.
+  const useOurParser = (t.parserVariant || "aowlparser") === "aowlparser" &&
+    SHIM_SCRIPTS_RUN && !!t.nifparser && fs.existsSync(t.nifparser);
   const shim = path.join(stage, "nifler");
   if (useOurParser) { fs.writeFileSync(shim, shimScript(t)); fs.chmodSync(shim, 0o755); }
-  else if (fs.existsSync(shim)) fs.rmSync(shim);
+  else clearShim(stage, "nifler");
   // Stage a `hexer` shim → aowlhexer so nimony's build (findTool("hexer")) uses
   // OUR lowering pass — only when the profile selects the aowlhexer variant.
   // AOWLMONY_NO_AOWLHEXER=1 forces nimony's hexer regardless.
@@ -605,7 +659,10 @@ function compile(nimFile, o, t) {
   // nimsem's `m` argv to aowlsem's, and reuses real nimsem's `x` subcommand as a
   // mechanical indexer (no semantics). See semShimScript.
   const wantAowlsem = (t.semVariant || "nimsem") === "aowlsem";
-  const useAowlsem = wantAowlsem && t.aowlsem && fs.existsSync(t.aowlsem) && !process.env.AOWLMONY_NO_AOWLSEM;
+  // Script-shaped for the same reason as the nifler shim (the m/x argv
+  // translation), and unreachable on Windows for the same reason.
+  const useAowlsem = wantAowlsem && SHIM_SCRIPTS_RUN && t.aowlsem &&
+    fs.existsSync(t.aowlsem) && !process.env.AOWLMONY_NO_AOWLSEM;
   const semShim = path.join(stage, "nimsem");
   if (useAowlsem) {
     const libDir = path.join(path.dirname(path.dirname(t.nimony)), "lib");
@@ -640,7 +697,9 @@ function compile(nimFile, o, t) {
     NIFRW_USER: abs,
     PATH: stage + path.delimiter + process.env.PATH,
   });
-  log(o, "nifparser parses", path.basename(abs) + ";",
+  // Report what will run, not what the profile asked for. Every arm of this line
+  // is now the same boolean that decides whether a shim is staged at all.
+  log(o, useOurParser ? "nifparser parses" : "nimony nifler parses", path.basename(abs) + ";",
     useAowlsem ? "sem via aowlsem (ours)" : "sem via nimony nimsem;",
     useAifhexer ? "lowering via aowlhexer (ours)" : "lowering via nimony hexer");
   // Take the machine-wide lock. `nimony c` links against
@@ -1542,9 +1601,7 @@ function main() {
     return;
   }
 
-  if (t.semVariant === "aowlsem" && !(t.aowlsem && fs.existsSync(t.aowlsem)))
-    console.error("  " + C.amber("!") + " " + C.gray("profile selects ") + C.cyan("sem=aowlsem") +
-      C.gray(", but the aowlsem binary was not found (build ~/aowlsem/bin/aowlsem or set AOWLMONY_AOWLSEM) — using nimony sem"));
+  warnFallbacks(t);
 
   if (cmd === "parse") {
     const f = o._[0]; if (!f) fail("parse needs a .nim file");

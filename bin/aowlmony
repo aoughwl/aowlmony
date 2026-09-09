@@ -582,9 +582,10 @@ for a in "$@"; do
     case "$a" in
       --base:*) base="$a" ;;
       --nimcache:*) nc="$a" ;;
-      # nimony forwards its own -p: to nimsem as --path:; aowlsem resolves the
+      # nimony forwards a -p: it was given to nimsem as --p:; aowlsem resolves the
       # import graph itself, so it needs every one of them, not just the stdlib
       --path:*|-p:*) paths+=("$a") ;;
+      --p:*) paths+=("-p:\${a#--p:}") ;;   # nimony re-dashes a -p: it was given
       m) mode=m; seen_cmd=1 ;;
       x) mode=x; seen_cmd=1 ;;
       e|idetools) mode=other; seen_cmd=1 ;;

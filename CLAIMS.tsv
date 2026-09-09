@@ -1,0 +1,46 @@
+# CLAIMS.tsv -- the numbers this repo's documentation states, and the command
+# that printed each. See tools/claimcheck.py; run it with `bash test/claims.sh`.
+#
+# Three repos in this toolchain were caught in two days publishing a score no
+# gate had ever printed: the docs site's "498/498 byte-exact modules" for aowlsem
+# (an hconv-site census, `oracle 527 | ours 498`, reworded into a module count --
+# the real figure was 46/55), aowlc's "73/73" for a script that printed 66/67,
+# and its "77/77" for one that prints 78/78. Nothing caught any of them, because
+# no gate read prose.
+#
+# THIS REPO'S STRUCTURAL RISK, which is worth stating because it decides what
+# this file can do: not one of aowlmony's seven test entry points has a declared
+# denominator. test/test.js prints `${pass}/${pass+fail} passed` and the six
+# shell scripts print `$pass passed · $fail failed` -- every total is DERIVED, so
+# a check that stops running shrinks the gate silently instead of failing it.
+# That is the same defect aowli's gatelib.sh was written to prevent. Until a
+# declared plan exists here, a numerator from these scripts cannot be pinned by
+# anything, which is why DESIGN.md's "Suite 24/25 -> 25/25" is filed as the
+# record of one change rather than as a claim about the suite.
+#
+# NOT SWEPT, deliberately: DIFFERENTIATION.md and ROADMAP.md. They are strategy
+# documents and say so; TOWER.md's own header calls it "a design proposal ... Not
+# a description of existing code". "~80% built" and "~60% of the way to a CAS" are
+# author's judgements, visibly hedged, and reading them as gate scores would be a
+# category error in the other direction. What IS rowed from TOWER.md is 310/310,
+# because that one is a real gate's output -- aowlparser's -- restated here where
+# nothing measures it, so it is checked against aowlparser's own stress.sh.
+#
+# Columns: FILE <TAB> ANCHOR <TAB> CLASS <TAB> NUMBER <TAB> SOURCE <TAB> EXTRACT <TAB> GUARD
+DESIGN.md	Suite 24/25 → 25/25.	HISTORICAL	24/25	a before/after recorded against the shim fix in the same bullet. `npm test` (node test/test.js) prints `N/M passed` with a derived denominator, so nothing pins 25 and re-running it would not reproduce this pair. It is the record of one change, not the suite's state.
+TOWER.md	310/310 structural parity on full	EXPENSIVE	310/310	bash ~/aowlparser.ghfresh/tests/stress.sh ~/Nim/lib	total=(\d+)\s+pass=(\d+)	oracle-skip=[1-9]|oracle not found|No such file
+README.md	`--timeout:N` bounds each leg (default 30s)	BASELINE	30s	a default in the driver's own argument parsing, not a measurement. Changing it is a decision.
+
+SWEEP	README.md
+SWEEP	DESIGN.md
+# Illustrative program transcripts and ABI/format constants, not gate scores.
+IGNORE	README.md	^\s*\$
+IGNORE	DESIGN.md	^\s*\$
+IGNORE	README.md	aowlmony (interp|exec|build|run)
+IGNORE	DESIGN.md	aowlmony (interp|exec|build|run)
+IGNORE	README.md	^\|
+IGNORE	DESIGN.md	^\|
+IGNORE	README.md	0x[0-9a-fA-F]
+IGNORE	DESIGN.md	0x[0-9a-fA-F]
+IGNORE	README.md	\.aif\d
+IGNORE	DESIGN.md	\.aif\d

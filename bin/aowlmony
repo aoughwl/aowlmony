@@ -624,15 +624,10 @@ function suggestFixHints(nimFile, abs, t, shownKeys) {
 function compile(nimFile, o, t) {
   if (!fs.existsSync(nimFile)) fail("no such file: " + nimFile);
   const abs = path.resolve(nimFile);
-  // Key the persistent stage on the source path AND the active stack variants, so
-  // switching profile (parser/hexer/sem) never reuses another profile's cached
-  // .p/.s/.c artifacts (nimony's incremental cache would otherwise skip re-parsing).
-  const key = require("crypto").createHash("sha1")
-    .update([abs, t.parserVariant, t.hexerVariant, t.semVariant].join("\0"))
-    .digest("hex").slice(0, 12);
-  const stage = o.out && o.keep ? path.join(path.dirname(abs), ".aowlmony")
-    : path.join(os.tmpdir(), "aowlmony-cache", key);
-  fs.mkdirSync(stage, { recursive: true });
+  // Decide WHICH implementation performs each swappable pass before the cache key
+  // is taken — the key has to describe the toolchain that actually ran, and these
+  // are pure functions of the resolved tools and the environment.
+  //
   // parser: inject OUR aowlparser (via the nifler shim) only when the active
   // profile selects the aowlparser variant; otherwise let nimony's own nifler
   // parse everything (the `nimony` profile / `aowl use parser nifler`).
@@ -642,14 +637,34 @@ function compile(nimFile, o, t) {
   // it anyway would only produce a dead file and a status line that lies.
   const useOurParser = (t.parserVariant || "aowlparser") === "aowlparser" &&
     SHIM_SCRIPTS_RUN && !!t.nifparser && fs.existsSync(t.nifparser);
+  // hexer: OUR lowering pass, when the profile selects the aowlhexer variant.
+  // AOWLMONY_NO_AOWLHEXER=1 forces nimony's hexer regardless.
+  const wantAifhexer = (t.hexerVariant || "aowlhexer") === "aowlhexer";
+  const useAifhexer = wantAifhexer && t.aifhexer && fs.existsSync(t.aifhexer) && !process.env.AOWLMONY_NO_AOWLHEXER;
+  // Key the persistent stage on the source path AND the toolchain that RESOLVED —
+  // not the toolchain the profile asked for. Those are different whenever a slot
+  // falls back (no binary built, a platform that cannot stage the shim), and
+  // keying on the request meant a fallback run and a genuine all-ours run shared
+  // a key: the fallback's .p/.s/.c artifacts were then served to the real run,
+  // which reported aowlsem/aowlhexer over output nimsem and nimony's hexer had
+  // produced. A stale artifact under a name that says it is fresh is the worst
+  // shape this bug can take, and it survived until the cache dir was deleted by
+  // hand. The exe path, not just a boolean: two builds of aowlhexer are two
+  // toolchains, and the stage is machine-local so a path is a stable identity.
+  const semUse = () => (t.semVariant || "nimsem") === "aowlsem" && SHIM_SCRIPTS_RUN &&
+    t.aowlsem && fs.existsSync(t.aowlsem) && !process.env.AOWLMONY_NO_AOWLSEM;
+  const ran = (used, exe) => (used ? exe : "nimony");
+  const key = require("crypto").createHash("sha1")
+    .update([abs, t.parserVariant, t.hexerVariant, t.semVariant,
+             ran(useOurParser, t.nifparser), ran(useAifhexer, t.aifhexer),
+             ran(semUse(), t.aowlsem)].join("\0"))
+    .digest("hex").slice(0, 12);
+  const stage = o.out && o.keep ? path.join(path.dirname(abs), ".aowlmony")
+    : path.join(os.tmpdir(), "aowlmony-cache", key);
+  fs.mkdirSync(stage, { recursive: true });
   const shim = path.join(stage, "nifler");
   if (useOurParser) { fs.writeFileSync(shim, shimScript(t)); fs.chmodSync(shim, 0o755); }
   else clearShim(stage, "nifler");
-  // Stage a `hexer` shim → aowlhexer so nimony's build (findTool("hexer")) uses
-  // OUR lowering pass — only when the profile selects the aowlhexer variant.
-  // AOWLMONY_NO_AOWLHEXER=1 forces nimony's hexer regardless.
-  const wantAifhexer = (t.hexerVariant || "aowlhexer") === "aowlhexer";
-  const useAifhexer = wantAifhexer && t.aifhexer && fs.existsSync(t.aifhexer) && !(process.env.AOWLMONY_NO_AOWLHEXER || process.env.AOWLMONY_NO_AOWLHEXER);
   if (useAifhexer) stageHexer(stage, t.aifhexer);
   else clearShim(stage, "hexer");   // no stale shim left lingering in the cache
   o._usedAifhexer = useAifhexer;
@@ -658,11 +673,11 @@ function compile(nimFile, o, t) {
   // AOWLMONY_NO_AOWLSEM=1 forces nimony's nimsem regardless. The shim translates
   // nimsem's `m` argv to aowlsem's, and reuses real nimsem's `x` subcommand as a
   // mechanical indexer (no semantics). See semShimScript.
-  const wantAowlsem = (t.semVariant || "nimsem") === "aowlsem";
   // Script-shaped for the same reason as the nifler shim (the m/x argv
-  // translation), and unreachable on Windows for the same reason.
-  const useAowlsem = wantAowlsem && SHIM_SCRIPTS_RUN && t.aowlsem &&
-    fs.existsSync(t.aowlsem) && !process.env.AOWLMONY_NO_AOWLSEM;
+  // translation), and unreachable on Windows for the same reason. The SAME
+  // predicate the cache key was taken with — one definition, or the key stops
+  // describing the build.
+  const useAowlsem = !!semUse();
   const semShim = path.join(stage, "nimsem");
   if (useAowlsem) {
     const libDir = path.join(path.dirname(path.dirname(t.nimony)), "lib");

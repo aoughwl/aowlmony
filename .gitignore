@@ -14,6 +14,7 @@ ROADMAP.md
 # parity, ships as a release asset — it is never committed.
 nimcache/
 bin/aowlmony-ng
+bin/aowlmony-ng.exe
 .aowlmony/
 
 # Machine-local include paths for the editor tooling (build.sh takes AOWLKIT).

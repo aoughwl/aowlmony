@@ -778,9 +778,13 @@ function compile(nimFile, o, t) {
   // source stem. It costs nothing extra (we already ran that compile) and — unlike
   // aowlc today — it handles stdout, so `verify` can use it as a native leg.
   // Our parser and hexer still produced its IR; only the C emission is nimony's.
-  const nbin = path.join(nc, mainHash, path.basename(abs, path.extname(abs)));
-  return { stage, nc, mainHash, snif, cnif, pnif, byOurParser, compileMs,
-           nbin: fs.existsSync(nbin) ? nbin : null };
+  // …under the stem, PLUS the platform's executable suffix. Without the .exe
+  // probe this is null on every Windows build, so `--native:nimony` reported
+  // "nimony linked no binary" for a binary sitting right there. Same shape as
+  // b2bce2e, which had to teach the tool probe the suffix.
+  const nbinBase = path.join(nc, mainHash, path.basename(abs, path.extname(abs)));
+  const nbin = [nbinBase, nbinBase + ".exe"].find((p) => fs.existsSync(p)) || null;
+  return { stage, nc, mainHash, snif, cnif, pnif, byOurParser, compileMs, nbin };
 }
 
 function runTool(bin, args, opts = {}) {
@@ -1596,6 +1600,7 @@ function main() {
     const rows = [
       ["run FILE", "native: compile → binary → run"],
       ["build FILE [-o BIN]", "native: emit a binary"],
+      ["build FILE --native:N", "which realizer emits it: aowlc (default) or nimony"],
       ["exec FILE --entry N", "native: call one proc, print result"],
       ["interp FILE", "interpret via aowli (tree-walk)"],
       ["eval FILE | -e CODE", "run via aowli; -e runs inline code, - reads stdin"],
@@ -1705,6 +1710,37 @@ function main() {
       process.exit(st);
     }
     case "build": {
+      // Which native realizer emits the binary? Spelled and validated exactly as
+      // `verify` spells it — a flag that means one thing on one command and
+      // something else on the next is worse than not having it.
+      //
+      // The default is UNCHANGED: aowlc, the fully self-owned C backend.
+      // `--native:nimony` hands back the binary the compile we already ran
+      // linked (our parser and our hexer produced its IR; only the C emission is
+      // nimony's). It exists because `build` had no fallback at all: when
+      // aowlc's C emitter regressed there was no way to get a binary out of this
+      // driver, even though `verify` could already drive both backends and the
+      // nimony one was sitting finished in the nimcache. Costs nothing — that
+      // compile is already paid for.
+      const which = o.native || "aowlc";
+      if (which !== "nimony" && which !== "aowlc") fail("--native takes nimony|aowlc, not '" + which + "'");
+      if (which === "nimony") {
+        if (!b.nbin) {
+          console.error("");
+          console.error("  " + C.red(G.cross) + " " + C.bold(C.red("build")) + " " + C.gray(G.bar) + " " +
+            C.gray("nimony linked no binary for this module — nothing to hand back"));
+          console.error("  " + C.gray("  the self-owned backend emits one from the same IR: ") +
+            C.teal("aowlmony build " + file));
+          console.error("");
+          process.exit(2);
+        }
+        const dest = o.out || path.join(process.cwd(),
+          path.basename(absSrc, path.extname(absSrc)) + (process.platform === "win32" ? ".exe" : ""));
+        const { ms } = timeRun(() => { fs.copyFileSync(b.nbin, dest); return {}; });
+        console.error("  " + C.gray("nimony: built ") + C.cyan(dest));
+        timingLine(cmd, b.compileMs, ms, o);
+        process.exit(0);
+      }
       const a = ["build", b.cnif];
       if (o.out) a.push("-o", o.out);
       const { r, ms } = timeRun(() => runTool("node", [t.nifc, ...a]));

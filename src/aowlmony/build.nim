@@ -240,8 +240,11 @@ proc adoptArtifacts(res: var BuildResult, nc, compileTarget, mainHash, cnif: str
   if slash >= 0: stem = stem[slash + 1 ..< stem.len]
   let dot = find(stem, '.')
   if dot > 0: stem = stem[0 ..< dot]
-  let nbin = nc & "/" & mainHash & "/" & stem
-  if tools.fileExists(nbin): res.nbin = nbin
+  # …under the stem, PLUS the platform's executable suffix. A bare-name probe
+  # comes up empty on EVERY Windows build, so `--native:nimony` reported "nimony
+  # linked no binary" for a binary sitting right there in the nimcache. Same
+  # miss, and the same fix, as b2bce2e for the tool probe.
+  res.nbin = tools.resolveExe(nc & "/" & mainHash & "/" & stem)
 
 proc findMain(nc, stage, absEntry: string): tuple[hash: string, cnif: string] =
   ## The main module is the nc subdirectory holding <hash>.c.nif named after

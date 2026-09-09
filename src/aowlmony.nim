@@ -160,6 +160,7 @@ proc cmdHelp(t: Tools) =
   let rows = @[
     @["run FILE", "native: compile → binary → run"],
     @["build FILE [-o BIN]", "native: emit a binary"],
+    @["build FILE --native:N", "which realizer emits it: aowlc (default) or nimony"],
     @["exec FILE --entry N", "native: call one proc, print result"],
     @["interp FILE", "interpret via aowli (tree-walk)"],
     @["eval FILE | -e CODE", "run via aowli; -e runs inline code, - reads stdin"],
@@ -784,11 +785,60 @@ proc main() =
     if rc == 0: timingLine(cmd, b.compileMs, ms, o.showTime)
     quit rc
   of "build":
+    # Which native realizer emits the binary? Spelled and validated exactly as
+    # `verify` spells it — a flag that means one thing on one command and
+    # something else on the next is worse than not having it.
+    #
+    # The default is UNCHANGED: aowlc, the fully self-owned C backend.
+    # `--native:nimony` hands back the binary the compile we already ran linked
+    # (our parser and our hexer produced its IR; only the C emission is
+    # nimony's). It exists because `build` had no fallback at all: when aowlc's
+    # C emitter regressed there was no way to get a binary out of this driver,
+    # even though `verify` could already drive both backends and the nimony one
+    # was sitting finished in the nimcache. Costs nothing — already paid for.
+    let which = if o.native.len > 0: o.native else: "aowlc"
+    if which != "nimony" and which != "aowlc":
+      fail("--native takes nimony|aowlc, not '" & which & "'")
+    let t0 = getMonoTime()
+    if which == "nimony":
+      if b.nbin.len == 0:
+        stderr.writeLine ""
+        stderr.writeLine "  " & red(GCross) & " " & bold(red("build")) & " " &
+          gray(GBar) & " " & gray("nimony linked no binary for this module — nothing to hand back")
+        stderr.writeLine "  " & gray("  the self-owned backend emits one from the same IR: ") &
+          teal("aowlmony build " & file)
+        stderr.writeLine ""
+        quit 2
+      # Mirror aowlc's own default: -o if given, else the stem in the CURRENT
+      # directory (outPath() puts it beside the SOURCE, which is not what the
+      # other realizer does, and `build` must not depend on which one ran).
+      var dest = o.outFile
+      if dest.len == 0:
+        var stem = baseNameOf(absSrc)
+        let dot = find(stem, '.')
+        if dot > 0: stem = stem[0 ..< dot]
+        var cwd = "."
+        try:
+          cwd = getCurrentDir()
+        except:
+          discard
+        dest = cwd & "/" & stem & ExeSuffix
+      try:
+        writeFile(dest, readFile(b.nbin))
+      except:
+        fail("could not write " & dest)
+      # A copy through the file API does not carry the execute bit, and a build
+      # that emits an unrunnable file is not a build.
+      when not defined(windows):
+        discard execShellCmd("chmod 755 " & quoteShell(dest))
+      stderr.writeLine "  " & gray("nimony: built ") & cyan(tildeAbbrev(dest))
+      let ms = float(ticks(getMonoTime()) - ticks(t0)) / 1e6
+      timingLine(cmd, b.compileMs, ms, o.showTime)
+      quit 0
     var a = @[t.native, "build", b.cnif]
     if o.outFile.len > 0:
       a.add "-o"
       a.add o.outFile
-    let t0 = getMonoTime()
     let rc = runInherit("node", a)
     let ms = float(ticks(getMonoTime()) - ticks(t0)) / 1e6
     if rc == 0: timingLine(cmd, b.compileMs, ms, o.showTime)

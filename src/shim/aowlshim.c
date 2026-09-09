@@ -308,6 +308,50 @@ static int roleNifler(int argc, char **argv) {
 
 /* ---------- nimsem role ---------------------------------------------- */
 
+/* The `--base:` aowlsem is given is NOT the one nimony hands nimsem.
+
+   nifler writes every line-info file name RELATIVE TO ITS OWN CWD
+   (nimony/src/nifler/bridge.nim: relativePath(..., getCurrentDir())), and
+   nimsem reads them back with absolutePath() - anchored to the cwd again, so
+   that round trip closes wherever the compiler runs.  aowlsem instead anchors
+   them to `--base:`, which nimony derives from the DIRECTORY OF THE MAIN FILE
+   ON ITS COMMAND LINE (src/lib/argsfinder.nim, determineBaseDir).  Those two
+   name the same directory only when the compiler is run from the project -
+   and this driver never is: it compiles from its own stage, so that nimony's
+   findTool() finds our shims there.
+
+   The visible cost was a `.compile` pragma's ${path} resolving off a directory
+   the file has no relation to.  system/mimalloc.nim asks for
+   ${path}/../../../vendor/mimalloc/src/static.c; anchored to the stage's
+   grandparent instead of the stage, the `..` chain walked past the drive root
+   and every field collapsed to a bare stem - nimony/vendor/mimalloc/src/
+   static.c, unanchored, with `-DMI_STAT=1 -I` eaten off the flags beside it.
+   cc then reported `No such file or directory` for a file that exists, named
+   relatively, from a directory that never held it.
+
+   Spell it with forward slashes, too.  aowlsem resolves `..` by splitting on
+   '/' alone (lexicalAbsPath/collapseDots in aowlsem.nim), so a backslashed
+   C:\Users\...\stage is ONE segment and the first `..` deletes the whole prefix
+   rather than one directory - which is what turned an absolute path into that
+   stem.  Measured on this machine: a backslashed cwd reproduces the failure
+   exactly, a forward-slashed one yields the absolute path and the full flag
+   string.  Dropping `--base:` is not the alternative: with no base aowlsem
+   emits no `(build ...)` node at all, and the link then dies on `undefined
+   reference to mi_malloc`. */
+static const char *semBase(void) {
+  static char buf[4096 + 8];
+  char cwd[4096];
+  char *q;
+#ifdef _WIN32
+  if (!GetCurrentDirectoryA((DWORD)sizeof(cwd), cwd)) return NULL;
+#else
+  if (!getcwd(cwd, sizeof(cwd))) return NULL;
+#endif
+  for (q = cwd; *q; q++) if (*q == '\\') *q = '/';
+  snprintf(buf, sizeof(buf), "--base:%s", cwd);
+  return buf;
+}
+
 static int roleNimsem(int argc, char **argv) {
   const char *real = envOr("AOWLSHIM_NIMSEM", "");
   const char *sem = envOr("AOWLSHIM_SEM", "");
@@ -325,7 +369,7 @@ static int roleNimsem(int argc, char **argv) {
   for (i = 1; i < argc; i++) {
     char *a = argv[i];
     if (!seenCmd) {
-      if (strncmp(a, "--base:", 7) == 0) base = a;
+      if (strncmp(a, "--base:", 7) == 0) { /* replaced by semBase(), above */ }
       else if (strncmp(a, "--nimcache:", 11) == 0) nc = a;
       /* nimony forwards its own -p: to nimsem as --path:.  aowlsem resolves
          the import graph itself, so it needs every one of them, not just the
@@ -365,6 +409,7 @@ static int roleNimsem(int argc, char **argv) {
   sa[ns++] = (char *)"m";
   sa[ns++] = (char *)in;
   sa[ns++] = out;
+  base = semBase();
   if (base) sa[ns++] = (char *)base;
   if (nc) sa[ns++] = (char *)nc;
   sa[ns++] = pflag;

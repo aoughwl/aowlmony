@@ -576,11 +576,23 @@ NIMSEM=${JSON.stringify(t.nimsemReal)}
 LIB=${JSON.stringify(libDir)}
 DBG="\${AOWLMONY_SEM_DEBUG:-}"
 [ -n "$DBG" ] && { echo "=== shim raw argv ($#): $*"; echo "cwd=$(pwd)"; } >> /tmp/shimtrace.log
-mode=""; base=""; nc=""; issystem=0; seen_cmd=0; files=(); paths=()
+mode=""; nc=""; issystem=0; seen_cmd=0; files=(); paths=()
+# NOT the --base: nimony passes. nifler spells line-info file names relative to
+# its own CWD and nimsem reads them back with absolutePath(), so that round trip
+# closes wherever the compiler runs; aowlsem instead anchors them to --base:,
+# which nimony derives from the directory of the main file on its command line.
+# Those agree only when the compiler is run from the project, and this driver
+# never is -- it compiles from its stage. The visible cost was a .compile
+# pragma's path variable resolving off an unrelated directory: mimalloc.nim
+# asks for <path>/../../../vendor/mimalloc/src/static.c, and anchored to the
+# wrong place that walked past the root and collapsed to a bare, unanchored
+# nimony/vendor/mimalloc/src/static.c, which cc cannot find. See the long note
+# over semBase() in src/shim/aowlshim.c -- the two must stay in step.
+base="--base:$PWD"
 for a in "$@"; do
   if [ "$seen_cmd" = 0 ]; then
     case "$a" in
-      --base:*) base="$a" ;;
+      --base:*) : ;;   # replaced, see above
       --nimcache:*) nc="$a" ;;
       # nimony forwards a -p: it was given to nimsem as --p:; aowlsem resolves the
       # import graph itself, so it needs every one of them, not just the stdlib

@@ -119,6 +119,23 @@ console.log("verify (native ≡ interpreted):");
     check("newerBuildThan finds the newer build", (V.newerBuildThan(a, [b2]) || {}).path, b2);
     check("newerBuildThan is silent when ours is newest", V.newerBuildThan(b2, [a]), null);
     check("newerBuildThan ignores the resolved path itself", V.newerBuildThan(a, [a]), null);
+    // Every candidate path is spelled without a suffix; on Windows every binary
+    // has one. A probe that cannot see `<tool>.exe` finds NOTHING of ours there
+    // and every slot quietly falls back to nimony.
+    const wexe = path.join(os.tmpdir(), "aowlmony-test-probe.exe");
+    fs.writeFileSync(wexe, "x");
+    const bare = wexe.slice(0, -4);
+    try { fs.rmSync(bare); } catch (_) {}
+    const win = process.platform === "win32";
+    check("probe finds a binary the candidate list spells without .exe",
+      V.firstExisting([bare]), win ? wexe : bare);
+    check("probe prefers the exact candidate over the .exe sibling",
+      V.firstExisting([a, bare]), a);
+    check("off Windows the suffix expansion is the identity",
+      JSON.stringify(V.exeVariants(bare)), JSON.stringify(win ? [bare, wexe] : [bare]));
+    check("newerBuildThan sees a newer build spelled with .exe",
+      (V.newerBuildThan(a, [bare]) || {}).path, win ? wexe : undefined);
+    fs.rmSync(wexe);
   }
   {
     const sl = path.join(os.tmpdir(), "aowlmony-test-slice.nim");

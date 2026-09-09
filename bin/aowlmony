@@ -130,7 +130,19 @@ function timingLine(label, compileMs, runMs, o) {
   console.error("  " + C.green(G.ok) + " " + C.dim(label + " · " + seg.join(" · ")));
 }
 
-function firstExisting(cands) { for (const c of cands) if (c && fs.existsSync(c)) return c; return cands[cands.length - 1]; }
+// Every candidate path in this file is spelled without an executable suffix,
+// because that is the name the binary has on Linux/macOS. On Windows every
+// aoughwl binary is <tool>.exe, so a bare-name probe misses ALL of them and the
+// driver silently falls back to nimony for every slot. Expand each candidate to
+// the platform's spellings rather than sprinkling a suffix over every probe —
+// off Windows EXE is "" and the expansion is the identity, so the POSIX
+// candidate order and results are unchanged.
+const EXE = process.platform === "win32" ? ".exe" : "";
+function exeVariants(c) { return EXE && !c.endsWith(EXE) ? [c, c + EXE] : [c]; }
+function firstExisting(cands) {
+  for (const c of cands) if (c) for (const v of exeVariants(c)) if (fs.existsSync(v)) return v;
+  return cands[cands.length - 1];
+}
 // The ecosystem is rebranding nif* → aif* → aowl* (aowl intermediate format),
 // and a sibling session may be mid-rename/rebuild (repo dir and binary can even
 // disagree, e.g. ~/aifparser/bin/aowlparser). Resolve every tool from all three
@@ -146,7 +158,7 @@ function nifparserCandidates() {
     for (const bin of names) out.push(path.join(HOME, repo, "bin", bin));
     const ncDir = path.join(HOME, repo, "nimcache");
     try { for (const d of fs.readdirSync(ncDir)) {
-      for (const bin of names) { const c = path.join(ncDir, d, bin); if (fs.existsSync(c)) out.push(c); }
+      for (const bin of names) for (const c of exeVariants(path.join(ncDir, d, bin))) if (fs.existsSync(c)) out.push(c);
     } } catch (_) {}
   }
   return out;
@@ -1007,7 +1019,8 @@ function newerBuildThan(resolved, candidates) {
   let mine;
   try { mine = fs.statSync(resolved).mtimeMs; } catch (_) { return null; }
   let best = null;
-  for (const c of candidates) {
+  // …and the same suffix expansion, or on Windows this never sees a build at all.
+  for (const c of candidates.flatMap((x) => (x ? exeVariants(x) : [x]))) {
     if (!c || path.resolve(c) === path.resolve(resolved)) continue;
     let st; try { st = fs.statSync(c); } catch (_) { continue; }
     if (st.mtimeMs > mine && (!best || st.mtimeMs > best.mtimeMs)) best = { path: c, mtimeMs: st.mtimeMs };
@@ -1639,5 +1652,5 @@ if (require.main === module) {
   try { main(); } catch (e) { fail((e && e.stack) || String(e)); }
 } else {
   module.exports = { parseTrace, attribute, unescapeArg, firstDiff, offsetToLineCol, locateOp,
-                     newerBuildThan, repoBin, nifParse, nifAtom, memoryFindings, witnessFinding };
+                     newerBuildThan, repoBin, firstExisting, exeVariants, nifParse, nifAtom, memoryFindings, witnessFinding };
 }

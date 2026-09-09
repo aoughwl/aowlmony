@@ -230,6 +230,16 @@ registry (`aowlup config`), honoring the active profile. Precedence:
 AOWLMONY_* env  →  aowlmony.config.json  →  aowlup registry  →  dev-fallback probe
 ```
 
+The manager itself is looked for where `install.sh` puts it — `~/.aowl/bin/aowlup`
+(the Nimony build) or `~/.aowl/bin/aowl` (the Node build, run through node) —
+then in a checkout at `~/aowlup`. With no manager reachable the registry is
+never consulted and every `+profile` is a no-op, so `aowlmony help` prints the
+profile it actually resolved: three profiles that print the same line means the
+manager was not found.
+
+Search paths are passed as `-p:DIR` / `--path:DIR` (repeatable), the same flag
+nimony takes; they reach nimony and, through the `nimsem` shim, `aowlsem`.
+
 The per-source build cache is keyed on the active variants, so switching profile
 never reuses another profile's artifacts.
 
@@ -240,11 +250,11 @@ never reuses another profile's artifacts.
 aowlhexer*, `+nimony` reports *nifler / nimony hexer*. Backends
 (`native/interp/js/…`) resolve their exes from the registry.
 
-> **`sem=aowlsem`** is the one slot the driver can't honor yet: `aowlsem` can't
-> semcheck `std/system` inside the `nimony c` build (it computes different
-> include-module hashes and doesn't emit the `.s.idx.nif` index), so selecting it
-> falls back to nimony `nimsem` with a note. The driver adopts `aowlsem`
-> automatically once it covers `system` — no driver change needed.
+**`sem=aowlsem`** is honored the same way: a `nimsem` shim routes every
+single-module `m` to `aowlsem` (nimony's own `x` indexer is reused as-is) and
+takes the binary the registry resolved — a checkout spelled `~/aowlsem.ghfresh`
+is as good as `~/aowlsem`. On Windows all three shims are one native trampoline
+(`src/shim/aowlshim.c`), because nimony's `findTool` only ever tests `<name>.exe`.
 
 ## The interpreter is first-class
 

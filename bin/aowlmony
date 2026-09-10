@@ -848,10 +848,21 @@ function compile(nimFile, o, t) {
   // default are two different programs out of one source, and one stage
   // between them would serve one's artifacts to the other.
   const defineFlags = (o.defines || []).map((d) => "-d:" + d);
+  // ...and the tool binaries' IDENTITY, not just their PATH. A rebuilt aowlsem /
+  // aowlhexer / aowlparser lands at the SAME path, so a path-only key served the
+  // PREVIOUS build's .p/.s/.c artifacts to the new compiler: a verified fix reads
+  // as "still broken" and the only cure was deleting the cache dir by hand.
+  // mtime+size is the cheap stable stand-in for content: the stage is
+  // machine-local and these are files this machine just linked.
+  const toolStamp = (p) => {
+    if (!p || p === "nimony") return p || "";
+    try { const st = fs.statSync(p); return p + "@" + st.mtimeMs + ":" + st.size; }
+    catch (_) { return p; }
+  };
   const key = require("crypto").createHash("sha1")
     .update([abs, t.parserVariant, t.hexerVariant, t.semVariant,
-             ran(useOurParser, t.nifparser), ran(useAifhexer, t.aifhexer),
-             ran(semUse(), t.aowlsem), ...pathFlags, ...defineFlags].join("\0"))
+             toolStamp(ran(useOurParser, t.nifparser)), toolStamp(ran(useAifhexer, t.aifhexer)),
+             toolStamp(ran(semUse(), t.aowlsem)), ...pathFlags, ...defineFlags].join("\0"))
     .digest("hex").slice(0, 12);
   const stage = o.out && o.keep ? path.join(path.dirname(abs), ".aowlmony")
     : path.join(os.tmpdir(), "aowlmony-cache", key);

@@ -53,7 +53,7 @@ proc runCap*(cmd: string, args: seq[string], timeoutS: int): Cap =
     result.errText = readFile(base & ".err")
   except:
     result.errText = ""
-  discard execShellCmd("rm -f " & quoteShell(base & ".out") & " " & quoteShell(base & ".err"))
+  shRmF(base & ".out", base & ".err")
 
 proc firstDiff*(a, b: string): int =
   ## Index of the first differing byte, or -1. When one is a strict prefix of the

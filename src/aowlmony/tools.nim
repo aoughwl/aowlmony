@@ -55,6 +55,42 @@ proc allPrefixes*(name: string): seq[string] =
 
 const ExeSuffix* = when defined(windows): ".exe" else: ""
 
+# ---- portable shell one-liners --------------------------------------------
+# execShellCmd is cmd.exe on Windows: `mkdir -p` there is "The syntax of the
+# command is incorrect", and rm/touch/chmod do not exist - every Windows build
+# printed that line and failed. One spelling per platform, here, once.
+proc winPath(p: string): string = p.replace("/", "\\")
+
+proc shMkdirP*(dir: string) =
+  when defined(windows):
+    discard execShellCmd("if not exist " & quoteShell(winPath(dir)) & " mkdir " & quoteShell(winPath(dir)))
+  else:
+    discard execShellCmd("mkdir -p " & quoteShell(dir))
+
+proc shRmF*(paths: varargs[string]) =
+  for p in paths:
+    when defined(windows):
+      discard execShellCmd("if exist " & quoteShell(winPath(p)) & " del /f /q " & quoteShell(winPath(p)))
+    else:
+      discard execShellCmd("rm -f " & quoteShell(p))
+
+proc shRmRf*(dir: string) =
+  when defined(windows):
+    discard execShellCmd("if exist " & quoteShell(winPath(dir)) & " rmdir /s /q " & quoteShell(winPath(dir)))
+  else:
+    discard execShellCmd("rm -rf " & quoteShell(dir))
+
+proc shTouch*(path: string) =
+  when defined(windows):
+    # `copy /b f+,,` rewrites the timestamp without changing the bytes.
+    discard execShellCmd("copy /b " & quoteShell(winPath(path)) & "+,, " & quoteShell(winPath(path)) & " >nul")
+  else:
+    discard execShellCmd("touch " & quoteShell(path))
+
+proc shChmodX*(path: string) =
+  when not defined(windows):
+    discard execShellCmd("chmod 755 " & quoteShell(path))
+
 proc resolveExe*(p: string): string =
   ## The spelling of `p` that exists on disk, "" if none.
   ##

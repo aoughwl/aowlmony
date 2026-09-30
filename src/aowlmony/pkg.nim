@@ -16,7 +16,7 @@
 
 import std/[syncio, strutils, envvars, os]
 import aowlkit/subprocess
-import stage, project
+import stage, project, tools
 
 type Resolved* = object
   name*: string
@@ -153,18 +153,18 @@ proc fetchGit(name, url, rev: string): Resolved =
     result.tree = treeHashOf(dir)
     result.ok = true
     return
-  discard execShellCmd("mkdir -p " & quoteShell(storeDir()))
+  shMkdirP(storeDir())
   # clone then checkout the exact rev: --branch takes a name, and a name is what
   # we are deliberately not trusting twice.
   let c = runCaptured("git", @["clone", "--quiet", url, dir], "", true)
   if not c.ok or c.exitCode != 0:
     result.err = "clone failed"
-    discard execShellCmd("rm -rf " & quoteShell(dir))
+    shRmRf(dir)
     return
   let co = runCaptured("git", @["-C", dir, "checkout", "--quiet", rev], "", true)
   if not co.ok or co.exitCode != 0:
     result.err = "no such revision " & rev[0 ..< 8]
-    discard execShellCmd("rm -rf " & quoteShell(dir))
+    shRmRf(dir)
     return
   result.tree = treeHashOf(dir)
   result.ok = true

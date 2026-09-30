@@ -148,11 +148,11 @@ proc writeShim(path, body: string) =
     writeFile(path, body)
   except:
     return
-  discard execShellCmd("chmod 755 " & quoteShell(path))
+  shChmodX(path)
 
 proc removeIfPresent(path: string) =
   if tools.fileExists(path):
-    discard execShellCmd("rm -f " & quoteShell(path))
+    shRmF(path)
 
 # nimony's findTool() appends the platform ExeExt and looks in the CWD — the
 # stage dir — before its own bin/. On POSIX ExeExt is "" and a shim script named
@@ -165,6 +165,61 @@ proc removeIfPresent(path: string) =
 # shims carry routing logic and cannot be replaced by a copy.
 const ShimScriptsRun* = not defined(windows)
 proc shimPath(stageDir, name: string): string = stageDir & "/" & name & ExeSuffix
+
+## NIFRW_USER and PATH are lists; on Windows every entry starts with `C:`, so the
+## separator cannot be ':' there (aowlshim.c splits on ';' on Windows).
+const ListSep* = when defined(windows): ";" else: ":"
+
+proc copyFresh(src, dst: string): bool =
+  ## Byte copy through the file API (Windows has no `cp`); rewritten only when
+  ## the bytes differ, so a warm stage pays one read.
+  var s = ""
+  try: s = readFile(src)
+  except: return false
+  var cur = ""
+  try: cur = readFile(dst)
+  except: cur = ""
+  if cur != s:
+    try: writeFile(dst, s)
+    except: return false
+  result = true
+
+var shimExeMemo = "?"     ## "?" = not tried, "" = tried and failed
+proc shimExe*(): string =
+  ## The native routing trampoline (src/shim/aowlshim.c), compiled once per
+  ## source change and cached. Windows only: nimony's findTool tests nothing but
+  ## `<name>.exe`, so a script-shaped nimsem shim is never even looked at, and
+  ## sem=aowlsem silently fell back to nimsem on every Windows build.
+  if shimExeMemo != "?": return shimExeMemo
+  shimExeMemo = ""
+  let src = getAppDir() & "/../src/shim/aowlshim.c"
+  if not tools.fileExists(src): return ""
+  let dir = homeDir() & "/.aowl/cache/.shim"
+  let outp = dir & "/aowlshim" & ExeSuffix
+  var srcText = ""
+  try: srcText = readFile(src)
+  except: return ""
+  let stampPath = dir & "/aowlshim.src"
+  var stamp = ""
+  try: stamp = readFile(stampPath)
+  except: stamp = ""
+  if stamp == srcText and tools.fileExists(outp):
+    shimExeMemo = outp
+    return outp
+  shMkdirP(dir)
+  var cc = getEnv("AOWLMONY_CC", "")
+  if cc.len == 0:
+    for p in ["C:/msys64/ucrt64/bin/gcc.exe", "C:/msys64/mingw64/bin/gcc.exe", "gcc"]:
+      if p == "gcc" or tools.fileExists(p):
+        cc = p
+        break
+  if execShellCmd(quoteShell(cc) & " -O2 -o " & quoteShell(outp) & " " & quoteShell(src)) != 0 or
+     not tools.fileExists(outp):
+    return ""
+  try: writeFile(stampPath, srcText)
+  except: discard
+  shimExeMemo = outp
+  result = outp
 
 proc stageHexer(stageDir, exe: string) =
   if ShimScriptsRun:
@@ -283,7 +338,7 @@ proc build*(entry: string, t: Tools, verbose = false,
 
   let st = stageDir(t)
   let nc = st & "/nc"
-  discard execShellCmd("mkdir -p " & quoteShell(nc))
+  shMkdirP(nc)
   result.stage = st
   result.nc = nc
   result.userFile = abs
@@ -298,7 +353,7 @@ proc build*(entry: string, t: Tools, verbose = false,
   var extraPaths: seq[string] = @[]
   if proj.prelude.len > 0:
     let wrapDir = st & "/wrap/" & sha1Hex(abs)[0 ..< 12]
-    discard execShellCmd("mkdir -p " & quoteShell(wrapDir))
+    shMkdirP(wrapDir)
     var srcText = ""
     try:
       srcText = readFile(abs)
@@ -350,11 +405,29 @@ proc build*(entry: string, t: Tools, verbose = false,
   else: clearShim(st, "hexer")
   result.usedHexer = useHexer
 
-  let useSem = t.semVariant == "aowlsem" and t.aowlsem.len > 0 and ShimScriptsRun and
-               tools.fileExists(t.aowlsem) and getEnv("AOWLMONY_NO_AOWLSEM", "").len == 0
+  let wantSem = t.semVariant == "aowlsem" and t.aowlsem.len > 0 and
+                tools.fileExists(t.aowlsem) and getEnv("AOWLMONY_NO_AOWLSEM", "").len == 0
+  # Off Windows the routing is a bash script; on Windows it is the trampoline,
+  # staged under the only name findTool tests. No trampoline = honest fallback.
+  let useSem = wantSem and (ShimScriptsRun or shimExe().len > 0)
   if useSem:
     let root = repoRootOf(t.nimony)
-    writeShim(st & "/nimsem", semShim(t, root & "/lib", root & "/src/lib", st))
+    when defined(windows):
+      discard copyFresh(shimExe(), shimPath(st, "nimsem"))
+      # nifmake runs `nimsem.exe` by BARE name through CreateProcess, which searches
+      # the directory nifmake.exe was loaded from BEFORE the cwd - nimony/bin, so the
+      # real nimsem always won. A byte copy of nifmake in the stage makes that
+      # directory ours (same fix as bin/aowlmony's stageNifmake).
+      discard copyFresh(root & "/bin/nifmake" & ExeSuffix, shimPath(st, "nifmake"))
+      try:
+        putEnv("AOWLSHIM_NIMSEM", t.nimsemReal)
+        putEnv("AOWLSHIM_SEM", t.aowlsem)
+        putEnv("AOWLSHIM_NIFLER", t.niflerReal)
+        putEnv("AOWLSHIM_PARSER", t.nifparser)
+        putEnv("AOWLSHIM_LIB", root & "/lib")
+      except: discard
+    else:
+      writeShim(st & "/nimsem", semShim(t, root & "/lib", root & "/src/lib", st))
   else: clearShim(st, "nimsem")
   result.usedSem = useSem
 
@@ -427,7 +500,7 @@ proc build*(entry: string, t: Tools, verbose = false,
   var userList = compileTarget
   var listed: seq[string] = @[compileTarget]
   if compileTarget != abs:
-    userList.add ":" & abs
+    userList.add ListSep & abs
     listed.add abs
   var everySource = userSources(proj)
   for f in sourcesUnder(depPaths): everySource.add f
@@ -437,11 +510,22 @@ proc build*(entry: string, t: Tools, verbose = false,
       if x == f: seenSrc = true
     if seenSrc: continue
     listed.add f
-    userList.add ":" & f
+    userList.add ListSep & f
 
-  var cmd = "cd " & quoteShell(st) & " && NIFRW_USER=" & quoteShell(userList) &
-    " PATH=" & quoteShell(st) & ":$PATH "
-  if tools.fileExists(nimlock): cmd.add quoteShell(nimlock) & " "
+  var cmd = ""
+  when defined(windows):
+    # The shell here is cmd.exe: `VAR=x cmd` and `:$PATH` are bash and died with
+    # "The syntax of the command is incorrect", so NO Windows compile ever ran.
+    # Export through the environment (inherited by nimony -> nifmake -> shims).
+    try:
+      putEnv("NIFRW_USER", userList)
+      putEnv("PATH", st.replace("/", "\\") & ";" & getEnv("PATH", ""))
+    except: discard
+    cmd = "cd /d " & quoteShell(st.replace("/", "\\")) & " && "
+  else:
+    cmd = "cd " & quoteShell(st) & " && NIFRW_USER=" & quoteShell(userList) &
+      " PATH=" & quoteShell(st) & ":$PATH "
+    if tools.fileExists(nimlock): cmd.add quoteShell(nimlock) & " "
   cmd.add quoteShell(t.nimony) & " c --nimcache:" & quoteShell(nc)
   for sp in searchPaths(proj):
     cmd.add " --path:" & quoteShell(sp)

@@ -311,7 +311,7 @@ proc dirOf(p: string): string =
 
 proc writeManifest*(p, content: string) =
   let dir = dirOf(p)
-  discard execShellCmd("mkdir -p " & quoteShell(dir))
+  shMkdirP(dir)
   try:
     writeFile(p, content)
   except:
@@ -338,7 +338,7 @@ proc bumpMtime*(path: string) =
   ## Tell the compiler's mtime-only staleness check the truth about a file whose
   ## CONTENT moved. Touching is enough: nifmake rebuilds a node when an input is
   ## strictly newer than its outputs.
-  discard execShellCmd("touch " & quoteShell(path))
+  shTouch(path)
 
 proc explainLines*(oldManifest, newManifest: string): seq[string] =
   ## What `aowlmony why` prints: the manifest lines that differ, in both

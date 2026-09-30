@@ -143,6 +143,28 @@ proc sourceOfPnif*(pnif: string): string =
 proc absolutise*(base, p: string): string =
   if p.len == 0: return ""
   if p[0] == '/': return p
+  # Windows: `C:\x` and `C:/x` are absolute, and a base like `C:\Users\me/.aowl`
+  # mixes separators - split on '/' alone kept `C:\Users\me` as ONE segment and
+  # the leading "/" below made `/C:\Users\me/...`, which matched no source.
+  when defined(windows):
+    let pp = p.replace("\\", "/")
+    if pp.len >= 2 and pp[1] == ':': return pp
+    let bb = base.replace("\\", "/")
+    var drive = ""
+    var rest = bb
+    if bb.len >= 2 and bb[1] == ':':
+      drive = bb[0 ..< 2]
+      rest = bb[2 ..< bb.len]
+    var wparts: seq[string] = @[]
+    for seg in split(rest & "/" & pp, '/'):
+      if seg.len == 0 or seg == ".": continue
+      if seg == "..":
+        if wparts.len > 0: discard wparts.pop()
+      else:
+        wparts.add seg
+    result = drive
+    for seg in wparts: result.add "/" & seg
+    return
   # resolve ../.. against the stage dir without touching the filesystem
   var parts: seq[string] = @[]
   for seg in split(base & "/" & p, '/'):

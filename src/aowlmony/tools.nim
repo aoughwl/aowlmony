@@ -33,7 +33,13 @@ type Tools* = object
 
 proc homeDir*(): string =
   let h = getEnv("HOME", "")
-  if h.len > 0: h else: "/root"
+  if h.len > 0: return h
+  # Windows has no HOME outside Git Bash; "/root" put the whole cache at
+  # \root\.aowl on the current drive and every tool probe missed.
+  when defined(windows):
+    let up = getEnv("USERPROFILE", "")
+    if up.len > 0: return up.replace("\\", "/")
+  "/root"
 
 proc fileExists*(p: string): bool =
   var f: File
@@ -246,7 +252,8 @@ proc resolveTools*(): Tools =
   # NB: do NOT seed this from the registry's sem slot — that slot holds the
   # ACTIVE variant's exe, which is nimony's own nimsem until the default flips.
   result.aowlsem = pick("AOWLMONY_AOWLSEM", "aowlsem", cfg,
-                        firstExisting(@[home & "/aowlsem/bin/aowlsem"]))
+                        firstExisting(@[home & "/aowlsem/bin/aowlsem",
+                                        home & "/aowlsem.ghfresh/bin/aowlsem"]))   # README promises this spelling
   result.nifparser = pick("AOWLMONY_NIFPARSER", "nifparser", cfg,
                           firstExisting(parserCandidates()))
   result.aowlsuggest = pick("AOWLMONY_AOWLSUGGEST", "aowlsuggest", cfg,

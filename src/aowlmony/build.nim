@@ -12,7 +12,7 @@
 ## its path relative to the compiler's CWD, so the stage dir must be stable or
 ## every build gets a fresh, empty cache.
 
-import std/[syncio, strutils, envvars, os, monotimes]
+import std/[syncio, strutils, envvars, os, monotimes, paths, dirs]
 import aowlkit/[subprocess, tty]
 import tools, stage, project
 
@@ -301,6 +301,15 @@ proc adoptArtifacts(res: var BuildResult, nc, compileTarget, mainHash, cnif: str
   # miss, and the same fix, as b2bce2e for the tool probe.
   res.nbin = tools.resolveExe(nc & "/" & mainHash & "/" & stem)
 
+proc samePath(a, b: string): bool =
+  ## Windows spells one file C:\x\y, C:/x/y and c:/x/y depending on who printed
+  ## it (expandFilename vs the .p.nif header); a raw == never matched there, so
+  ## every successful Windows build was reported as "compile failed".
+  when defined(windows):
+    result = a.replace("\\", "/").toLowerAscii == b.replace("\\", "/").toLowerAscii
+  else:
+    result = a == b
+
 proc findMain(nc, stage, absEntry: string): tuple[hash: string, cnif: string] =
   ## The main module is the nc subdirectory holding <hash>.c.nif named after
   ## itself — everything entry-point-specific lives under that subdir, because
@@ -310,18 +319,25 @@ proc findMain(nc, stage, absEntry: string): tuple[hash: string, cnif: string] =
   ## as the first one found. The stage is shared across projects now, so several
   ## main modules coexist in one nc; picking the first silently runs a different
   ## program, which is a wrong answer that looks like a successful build.
-  let ls = runCaptured("ls", @[nc], "", false)
-  if not ls.ok or ls.exitCode != 0: return ("", "")
-  for line in splitLines(ls.output):
+  # A native walk, not `ls`: there is no ls on a stock Windows box, and when
+  # one was on PATH its failure made every successful build "compile failed".
+  var names: seq[string] = @[]
+  try:
+    for k, p in walkDir(path(nc), relative = true):
+      if k == pcDir: names.add $p
+  except:
+    return ("", "")
+  for line in names:
     let d = strip(line)
     if d.len == 0: continue
     let c = phaseFile(nc & "/" & d, d, ".c")
-    if c.len == 0: continue
     let p = phaseFile(nc, d, ".p")
-    if p.len == 0: continue
-    let src = sourceOfPnif(p)
-    if src.len == 0: continue
-    if absolutise(stage, src) == absEntry: return (d, c)
+    let src = if p.len > 0: sourceOfPnif(p) else: ""
+    if getEnv("AOWLMONY_DEBUG", "").len > 0:
+      stderr.writeLine "[findMain] " & d & " src=" & src & " abs=" &
+        absolutise(stage, src) & " want=" & absEntry
+    if c.len == 0 or p.len == 0 or src.len == 0: continue
+    if samePath(absolutise(stage, src), absEntry): return (d, c)
   ("", "")
 
 proc build*(entry: string, t: Tools, verbose = false,
@@ -543,6 +559,12 @@ proc build*(entry: string, t: Tools, verbose = false,
   let m = findMain(nc, st, compileTarget)
   result.mainHash = m.hash
   result.cnif = m.cnif
+  # The driver judges success itself (nimony can exit 0 on failure), so when it
+  # says "compile failed" the reason has to be askable, not guessed at.
+  if getEnv("AOWLMONY_DEBUG", "").len > 0:
+    stderr.writeLine "[aowlmony debug] exit=" & $r.exitCode & " main=" & m.hash &
+      " target=" & compileTarget & "\n[aowlmony debug] cmd=" & cmd &
+      "\n[aowlmony debug] output:\n" & r.output
 
   # A build counts as failed when it emitted a diagnostic — NOT merely when no
   # .c.nif exists. A failed rebuild leaves the PREVIOUS build's .c.nif in the

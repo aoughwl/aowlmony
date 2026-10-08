@@ -107,12 +107,13 @@ proc semShim(t: Tools, libDir, srcLibDir, stageDir: string): string =
   "LIB=" & shellQuoteJson(libDir) & "\n" &
   "SRCLIB=" & shellQuoteJson(srcLibDir) & "\n" &
   "STAGE=" & shellQuoteJson(stageDir) & "\n" &
-  """mode=""; base=""; nc=""; issystem=0; seen_cmd=0; files=()
+  """mode=""; base=""; nc=""; issystem=0; seen_cmd=0; files=(); defs=()
 for a in "$@"; do
   if [ "$seen_cmd" = 0 ]; then
     case "$a" in
       --base:*) base="$a" ;;
       --nimcache:*) nc="$a" ;;
+      --d:*|-d:*|--define:*) defs+=("--d:${a#*:}") ;;
       m) mode=m; seen_cmd=1 ;;
       x) mode=x; seen_cmd=1 ;;
       e|idetools) mode=other; seen_cmd=1 ;;
@@ -136,6 +137,7 @@ sargs=(m "$in" "$out")
 sargs+=("--base:$STAGE")
 [ -n "$nc" ] && sargs+=("$nc")
 sargs+=("-p:$LIB" "-p:$SRCLIB")
+sargs+=("${defs[@]}")
 [ "$issystem" = 1 ] && sargs+=("--noSystem")
 "$AOWLSEM" "${sargs[@]}" || exit $?
 exec "$NIMSEM" x "$out"
@@ -400,6 +402,8 @@ proc build*(entry: string, t: Tools, verbose = false,
     cmd.add " --path:" & quoteShell(sp)
   for sp in depPaths:
     cmd.add " --path:" & quoteShell(sp)
+  for d in splitWhitespace(getEnv("AOWLMONY_DEFINES", "")):
+    cmd.add " -d:" & quoteShell(d)
   cmd.add " " & quoteShell(compileTarget)
 
   let t0 = getMonoTime()

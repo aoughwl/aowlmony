@@ -126,6 +126,17 @@ proc parseOpts(argv: seq[string]): Opts =
     elif a == "--as":
       inc i
       if i < argv.len: result.watchAs = argv[i]
+    elif a.startsWith("-d:") or a.startsWith("--define:") or a.startsWith("--d:"):
+      # Conditional symbols for the compile (`-d:aowlgc` selects nimony's
+      # tracing-GC memory mode). Carried in AOWLMONY_DEFINES, which the build
+      # forwards to nimony and folds into the stage key.
+      let name = a[find(a, ':') + 1 ..< a.len]
+      if name.len > 0:
+        let prev = getEnv("AOWLMONY_DEFINES", "")
+        try:
+          putEnv("AOWLMONY_DEFINES", (if prev.len > 0: prev & " " & name else: name))
+        except:
+          discard
     elif a == "--offline": result.offline = true
     elif a == "--no-cache":
       # One mechanism, not two: the build reads the env var, so the flag sets it

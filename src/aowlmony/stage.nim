@@ -96,7 +96,9 @@ proc aowlHome*(): string =
   if e.len > 0: e else: homeDir() & "/.aowl"
 
 proc stageKey*(t: Tools): string =
-  sha1Hex(KeySchema & "\n" & toolStamp(t))[0 ..< 12]
+  let defs = getEnv("AOWLMONY_DEFINES", "")
+  sha1Hex(KeySchema & "\n" & toolStamp(t) &
+          (if defs.len > 0: "\ndefines " & defs else: ""))[0 ..< 12]
 
 proc stageDir*(t: Tools): string =
   ## ~/.aowl/cache/<toolchain key>. The manager creates that directory and

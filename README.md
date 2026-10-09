@@ -13,6 +13,13 @@ wherever they exist, and reusing nimony's for the parts not yet rebuilt.
 
 ## Quick start
 
+Not installed yet? Three commands on Linux, about three minutes:
+**[Get started in 5 minutes](https://aoughwl.github.io/start)** (or see
+[aowlup](https://github.com/aoughwl/aowlup#install)). `run` and `build` are
+free; `interp`, `vm` and the TS/Python backends need the
+[paid bundle](https://aoughwl.github.io/store/) and say so by name when it is
+missing.
+
 New here? One command takes a `.nim` file all the way to a running program:
 
 ```sh

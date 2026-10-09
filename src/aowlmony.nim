@@ -35,12 +35,17 @@ proc fmtDur(ms: float): string =
     let tenths = int(ms / 100.0 + 0.5)
     $(tenths div 10) & "." & $(tenths mod 10) & "s"
 
-proc timingLine(label: string, compileMs: float, runMs: float, show: bool) =
+proc timingLine(label: string, compileMs: float, runMs: float, show: bool;
+                runWord = "ran") =
   ## A concise dim one-liner on STDERR, so it never pollutes captured output.
+  ## `runWord` names what the second figure measured. For the native backend it
+  ## is NOT the program: `build` spends it compiling and linking C, and `run`
+  ## spends it on that plus the run — "compiled 0ms · ran 13.0s" for a build
+  ## whose binary runs in 0.00 s read as a 13-second program (2026-10-09).
   if not show: return
   var seg: seq[string] = @[]
   if compileMs >= 0.0: seg.add "compiled " & fmtDur(compileMs)
-  if runMs >= 0.0: seg.add "ran " & fmtDur(runMs)
+  if runMs >= 0.0: seg.add runWord & " " & fmtDur(runMs)
   if seg.len == 0: return
   stderr.writeLine "  " & green(GOk) & " " & dim(label & " · " & joinStr(seg, " · "))
 
@@ -842,7 +847,7 @@ proc main() =
         discard execShellCmd("chmod 755 " & quoteShell(dest))
       stderr.writeLine "  " & gray("nimony: built ") & cyan(tildeAbbrev(dest))
       let ms = float(ticks(getMonoTime()) - ticks(t0)) / 1e6
-      timingLine(cmd, b.compileMs, ms, o.showTime)
+      timingLine(cmd, b.compileMs, ms, o.showTime, "backend")
       quit 0
     var a = @[t.native, "build", b.cnif]
     if o.outFile.len > 0:
@@ -850,13 +855,13 @@ proc main() =
       a.add o.outFile
     let rc = runInherit("node", a)
     let ms = float(ticks(getMonoTime()) - ticks(t0)) / 1e6
-    if rc == 0: timingLine(cmd, b.compileMs, ms, o.showTime)
+    if rc == 0: timingLine(cmd, b.compileMs, ms, o.showTime, "backend")
     quit rc
   of "run":
     let t0 = getMonoTime()
     let rc = runInherit("node", @[t.native, "run", b.cnif])
     let ms = float(ticks(getMonoTime()) - ticks(t0)) / 1e6
-    if rc == 0: timingLine(cmd, b.compileMs, ms, o.showTime)
+    if rc == 0: timingLine(cmd, b.compileMs, ms, o.showTime, "backend + ran")
     quit rc
   of "ts", "js", "py":
     let bin = case cmd

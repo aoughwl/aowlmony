@@ -130,8 +130,10 @@ proc loadStack*(): Stack =
   let home = homeDir()
   var manager = ""
   # the native manager first: it is the one that will ship as a release binary.
+  # ~/.aowl/bin/aowlup is where install.sh puts the release binary — the only
+  # copy a machine without an aowlup checkout has.
   for c in [home & "/aowlup/bin/aowlup-ng", home & "/aowlup/bin/aowlup",
-            home & "/.aowl/bin/aowl"]:
+            home & "/.aowl/bin/aowlup", home & "/.aowl/bin/aowl"]:
     if fileExists(c):
       manager = c
       break

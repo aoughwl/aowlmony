@@ -204,6 +204,15 @@ proc cmdHelp(t: Tools) =
 # --------------------------------------------------------------------------
 
 proc runInherit(cmd: string, args: seq[string]): int =
+  # An unresolved slot arrives here as "", and the shell answered
+  # "sh: 1: : Permission denied" — the first thing a new user without the paid
+  # interpreter saw from `aowlmony interp`. Refuse by name instead.
+  if cmd.len == 0:
+    stderr.writeLine "  " & red("✗") & " " & bold("this command needs a component that is not installed")
+    stderr.writeLine "    " & gray("run ") & teal("aowlup doctor") &
+      gray(" to see which slot is missing; aowli and the TS / Python backends are the paid bundle (") &
+      teal("aowlup login YOUR-KEY") & gray(")")
+    return 127
   var line = quoteShell(cmd)
   for a in args: line.add " " & quoteShell(a)
   execShellCmd(line)

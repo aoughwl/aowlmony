@@ -228,6 +228,67 @@ proc sortLines(xs: var seq[string]) =
       inc j
     inc i
 
+proc includeTargets(src: string): seq[string] =
+  ## The files `src` names in `include` statements, resolved against its own
+  ## directory, existing files only.
+  ##
+  ## Lexical on purpose. An included file is not a module: nimony folds it into
+  ## the includer, so it owns no `.c.nif` and `programClosure` can never see it.
+  ## Its contents can only change the program through the includer, which is
+  ## why the manifest records it AGAINST that includer (see `includeLines`).
+  ## A false match (the word in a string literal) names a file that is then
+  ## also hashed — over-invalidation, never a stale build.
+  result = @[]
+  var f: File
+  if not open(f, src, fmRead): return
+  var dir = ""
+  var cut = -1
+  var i = 0
+  while i < src.len:
+    if src[i] == '/': cut = i
+    inc i
+  if cut > 0: dir = src[0 ..< cut]
+  var line = ""
+  while readLine(f, line):
+    let s = strip(line)
+    var rest = ""
+    if s.startsWith("include ") or s.startsWith("include\t"):
+      rest = s[8 ..< s.len]
+    let hash = find(rest, '#')
+    if hash >= 0: rest = rest[0 ..< hash]
+    for item in split(rest, ','):
+      var p = strip(item)
+      if p.len >= 2 and p[0] == '"' and p[p.len - 1] == '"': p = p[1 ..< p.len - 1]
+      p = strip(p)
+      # no `continue` here: nimony's hexer rejects it inside this loop
+      # ("unreachable: (continue ...)")
+      if p.len > 0:
+        if not p.endsWith(".nim"): p.add ".nim"
+        let abs = if p[0] == '/': p else: absolutise(dir, p)
+        if tools.fileExists(abs): result.add abs
+  close(f)
+
+proc includeLines*(roots: seq[string]): seq[string] =
+  ## `inc <file> <hash> <module>` for every file `include`d, transitively, by a
+  ## module in `roots`. <module> is the ROOT module the text ends up in, even for
+  ## a nested include: that is the file whose mtime nifmake checks, so it is the
+  ## one `changedFiles` must hand back to be bumped. Before this, an edited
+  ## include left every key equal — `why` said "nothing changed" and the build
+  ## linked the previous compile of a proc that no longer existed.
+  result = @[]
+  var seen: seq[string] = @[]
+  for r in roots:
+    var work: seq[string] = includeTargets(r)
+    while work.len > 0:
+      let f = work.pop()
+      var dup = false
+      for x in seen:
+        if x == f: dup = true
+      if not dup:
+        seen.add f
+        result.add "inc " & f & " " & fileHash(f) & " " & r
+        for g in includeTargets(f): work.add g
+
 proc buildManifest*(entry, mainHash: string, closure: seq[string], t: Tools): string =
   ## Sorted, so discovery order cannot change the key and two manifests can be
   ## diffed by a merge walk.
@@ -241,6 +302,10 @@ proc buildManifest*(entry, mainHash: string, closure: seq[string], t: Tools): st
   for f in closure:
     if f == entry: continue
     lines.add "dep " & f & " " & fileHash(f)
+  var roots: seq[string] = @[entry]
+  for f in closure:
+    if f != entry: roots.add f
+  for l in includeLines(roots): lines.add l
   for l in splitLines(toolStamp(t)):
     if l.len > 0: lines.add "tool= " & l
   sortLines(lines)
@@ -288,7 +353,7 @@ proc inputCount*(manifest: string): int =
   ## never looked.
   result = 0
   for l in splitLines(manifest):
-    if l.startsWith("dep ") or l.startsWith("entry "): inc result
+    if l.startsWith("dep ") or l.startsWith("entry ") or l.startsWith("inc "): inc result
 
 proc manifestPath*(stage, entry: string): string =
   ## One manifest per entry point, inside the shared stage.
@@ -323,9 +388,9 @@ proc changedFiles*(oldManifest, newManifest: string): seq[string] =
   result = @[]
   var oldLines: seq[string] = @[]
   for l in splitLines(oldManifest):
-    if l.startsWith("dep ") or l.startsWith("entry "): oldLines.add l
+    if l.startsWith("dep ") or l.startsWith("entry ") or l.startsWith("inc "): oldLines.add l
   for l in splitLines(newManifest):
-    if not (l.startsWith("dep ") or l.startsWith("entry ")): continue
+    if not (l.startsWith("dep ") or l.startsWith("entry ") or l.startsWith("inc ")): continue
     var hit = false
     for o in oldLines:
       if o == l: hit = true
@@ -333,6 +398,9 @@ proc changedFiles*(oldManifest, newManifest: string): seq[string] =
     # the line differs: recover the path (2nd field)
     let parts = split(l, ' ')
     if parts.len >= 2: result.add parts[1]
+    # an include is compiled as part of its module (4th field): that module is
+    # the file nifmake's mtime check looks at, so it must be bumped too
+    if l.startsWith("inc ") and parts.len >= 4: result.add parts[3]
 
 proc bumpMtime*(path: string) =
   ## Tell the compiler's mtime-only staleness check the truth about a file whose

@@ -35,12 +35,17 @@ proc fmtDur(ms: float): string =
     let tenths = int(ms / 100.0 + 0.5)
     $(tenths div 10) & "." & $(tenths mod 10) & "s"
 
-proc timingLine(label: string, compileMs: float, runMs: float, show: bool) =
+proc timingLine(label: string, compileMs: float, runMs: float, show: bool;
+                runWord = "ran") =
   ## A concise dim one-liner on STDERR, so it never pollutes captured output.
+  ## `runWord` names what the second figure measured. For the native backend it
+  ## is NOT the program: `build` spends it compiling and linking C, and `run`
+  ## spends it on that plus the run — "compiled 0ms · ran 13.0s" for a build
+  ## whose binary runs in 0.00 s read as a 13-second program (2026-10-09).
   if not show: return
   var seg: seq[string] = @[]
   if compileMs >= 0.0: seg.add "compiled " & fmtDur(compileMs)
-  if runMs >= 0.0: seg.add "ran " & fmtDur(runMs)
+  if runMs >= 0.0: seg.add runWord & " " & fmtDur(runMs)
   if seg.len == 0: return
   stderr.writeLine "  " & green(GOk) & " " & dim(label & " · " & joinStr(seg, " · "))
 
@@ -204,6 +209,15 @@ proc cmdHelp(t: Tools) =
 # --------------------------------------------------------------------------
 
 proc runInherit(cmd: string, args: seq[string]): int =
+  # An unresolved slot arrives here as "", and the shell answered
+  # "sh: 1: : Permission denied" — the first thing a new user without the paid
+  # interpreter saw from `aowlmony interp`. Refuse by name instead.
+  if cmd.len == 0:
+    stderr.writeLine "  " & red("✗") & " " & bold("this command needs a component that is not installed")
+    stderr.writeLine "    " & gray("run ") & teal("aowlup doctor") &
+      gray(" to see which slot is missing; aowli and the TS / Python backends are the paid bundle (") &
+      teal("aowlup login YOUR-KEY") & gray(")")
+    return 127
   var line = quoteShell(cmd)
   for a in args: line.add " " & quoteShell(a)
   execShellCmd(line)
@@ -833,7 +847,7 @@ proc main() =
         discard execShellCmd("chmod 755 " & quoteShell(dest))
       stderr.writeLine "  " & gray("nimony: built ") & cyan(tildeAbbrev(dest))
       let ms = float(ticks(getMonoTime()) - ticks(t0)) / 1e6
-      timingLine(cmd, b.compileMs, ms, o.showTime)
+      timingLine(cmd, b.compileMs, ms, o.showTime, "backend")
       quit 0
     var a = @[t.native, "build", b.cnif]
     if o.outFile.len > 0:
@@ -841,13 +855,13 @@ proc main() =
       a.add o.outFile
     let rc = runInherit("node", a)
     let ms = float(ticks(getMonoTime()) - ticks(t0)) / 1e6
-    if rc == 0: timingLine(cmd, b.compileMs, ms, o.showTime)
+    if rc == 0: timingLine(cmd, b.compileMs, ms, o.showTime, "backend")
     quit rc
   of "run":
     let t0 = getMonoTime()
     let rc = runInherit("node", @[t.native, "run", b.cnif])
     let ms = float(ticks(getMonoTime()) - ticks(t0)) / 1e6
-    if rc == 0: timingLine(cmd, b.compileMs, ms, o.showTime)
+    if rc == 0: timingLine(cmd, b.compileMs, ms, o.showTime, "backend + ran")
     quit rc
   of "ts", "js", "py":
     let bin = case cmd

@@ -290,10 +290,24 @@ proc adoptArtifacts(res: var BuildResult, nc, compileTarget, mainHash, cnif: str
   var slash = -1
   var i = 0
   while i < stem.len:
-    if stem[i] == '/': slash = i
+    # `compileTarget` arrives as an absolute Windows path with backslashes
+    # (nimony's own argv echo), so a `/`-only scan never finds the last
+    # separator and `stem` stays the WHOLE PATH — `nc & "/" & mainHash & "/" &
+    # stem` then points nowhere, and `--native:nimony` always reported "nimony
+    # linked no binary" on Windows even when the binary was sitting right
+    # there in the nimcache. Check both separators; take the rightmost either
+    # finds.
+    if stem[i] == '/' or stem[i] == '\\': slash = i
     inc i
   if slash >= 0: stem = stem[slash + 1 ..< stem.len]
-  let dot = find(stem, '.')
+  # The LAST dot, not the first: a directory component can legitimately
+  # contain one (e.g. a version folder), and `find`'s first-match would cut
+  # the stem short there instead of at the real extension.
+  var dot = -1
+  i = 0
+  while i < stem.len:
+    if stem[i] == '.': dot = i
+    inc i
   if dot > 0: stem = stem[0 ..< dot]
   # …under the stem, PLUS the platform's executable suffix. A bare-name probe
   # comes up empty on EVERY Windows build, so `--native:nimony` reported "nimony

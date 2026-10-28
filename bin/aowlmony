@@ -1816,7 +1816,7 @@ function main() {
       ["verify FILE", "run native + interpreted, report the first divergent op"],
       ["verify FILE --memory", "trap dangling pointers under --fin: allocation site + use site"],
       ["parse FILE", "show OUR .p.nif"],
-      ["nif FILE", "compile only; print .s/.c.nif paths"],
+      ["artifacts FILE", "compile only; print .s/.c.nif paths"],
       ["fix FILE [--dry-run]", "apply aowlsuggest quick-fixes (cross-language habits)"],
       ["lint FILE", "aowlsuggest diagnostics only (no compile)"],
     ];
@@ -1885,7 +1885,8 @@ function main() {
   const timeRun = (fn) => { const s = process.hrtime.bigint(); const r = fn(); return { r, ms: Number(process.hrtime.bigint() - s) / 1e6 }; };
 
   switch (cmd) {
-    case "nif":
+    case "artifacts":
+    case "nif":  // old name, kept working silently
       console.log(".p.nif  " + b.pnif + (b.byOurParser ? "  (nifparser)" : "  (nifler)"));
       console.log(".s.nif  " + b.snif);
       console.log(".c.nif  " + b.cnif);

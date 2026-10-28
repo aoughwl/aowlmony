@@ -240,9 +240,12 @@ function resolveTools() {
   }
   const st = loadStack(), slots = st.slots || {};
   const reg = (slot) => (slots[slot] && slots[slot].exe) || "";
-  // precedence: AOWLMONY_* env → aowlmony.config.json (or deprecated aifmony.config.json) → aowlup registry → probe.
-  const pick = (env, key, def) =>
-    process.env[env] || process.env[env.replace(/^AOWLMONY_/, "AIFMONY_")] || cfg[key] || def;
+  // precedence: AOWLMONY_* env → legacy env alias (renamed var; same name under
+  // the old nif-branded spelling, or AIFMONY_* for the aifmony-era rename) →
+  // aowlmony.config.json (or deprecated aifmony.config.json) → aowlup registry → probe.
+  const pick = (env, key, def, legacy) =>
+    process.env[env] || (legacy && process.env[legacy]) ||
+    process.env[env.replace(/^AOWLMONY_/, "AIFMONY_")] || cfg[key] || def;
   const t = {
     nimony:    pick("AOWLMONY_NIMONY",    "nimony",    firstExisting([path.join(HOME, "nimony/bin/nimony")])),
     niflerReal:pick("AOWLMONY_NIFLER",    "nifler",    firstExisting([path.join(HOME, "nimony/bin/nifler")])),
@@ -256,13 +259,13 @@ function resolveTools() {
     // ACTIVE variant's exe, which is nimony's own nimsem until the default flips.
     // The registry only overrides below, when slots.sem.variant is aowlsem.
     aowlsem:   pick("AOWLMONY_AOWLSEM",   "aowlsem",   firstExisting([path.join(HOME, "aowlsem/bin/aowlsem")])),
-    nifparser: pick("AOWLMONY_NIFPARSER", "nifparser", firstExisting(nifparserCandidates())),
+    nifparser: pick("AOWLMONY_PARSER",    "nifparser", firstExisting(nifparserCandidates()), "AOWLMONY_NIFPARSER"),
     // OUR quick-fix / diagnostics layer (aowlsuggest). Consulted on a compile
     // failure to surface a fix + the command to apply it; also backs `aowlmony fix`.
     aowlsuggest:pick("AOWLMONY_AOWLSUGGEST","aowlsuggest",reg("suggest") || firstExisting([path.join(HOME, "aowlsuggest/bin/aowlsuggest")])),
-    nifiInterp:pick("AOWLMONY_NIFI",      "nifiInterp",reg("interp") || firstExisting(repoBin("nifi", "-interp"))),
-    nifiVm:    pick("AOWLMONY_NIFI_VM",   "nifiVm",    reg("vm")     || firstExisting(repoBin("nifi", "-vm"))),
-    nifc:      pick("AOWLMONY_NIFC",      "nifc",      reg("native") || firstExisting(repoBin("nifc"))),
+    nifiInterp:pick("AOWLMONY_INTERP",    "nifiInterp",reg("interp") || firstExisting(repoBin("nifi", "-interp")), "AOWLMONY_NIFI"),
+    nifiVm:    pick("AOWLMONY_VM",        "nifiVm",    reg("vm")     || firstExisting(repoBin("nifi", "-vm")), "AOWLMONY_NIFI_VM"),
+    nifc:      pick("AOWLMONY_C",         "nifc",      reg("native") || firstExisting(repoBin("nifc")), "AOWLMONY_NIFC"),
     // OUR lowering pass (aowlhexer). Used only when the active profile selects the
     // aowlhexer variant (see below); AOWLMONY_NO_AOWLHEXER=1 forces nimony's hexer.
     aifhexer:  pick("AOWLMONY_HEXER",     "aifhexer",  firstExisting([
@@ -282,7 +285,7 @@ function resolveTools() {
   // ahead of the aowlup registry — lets you exercise sem=aowlsem before the
   // registry default flips.
   t.semVariant    = process.env.AOWLMONY_SEM || (slots.sem || {}).variant || "nimsem";
-  if (t.parserVariant === "aowlparser" && reg("parser")) t.nifparser = process.env.AOWLMONY_NIFPARSER || process.env.AIFMONY_NIFPARSER || cfg.nifparser || reg("parser");
+  if (t.parserVariant === "aowlparser" && reg("parser")) t.nifparser = process.env.AOWLMONY_PARSER || process.env.AOWLMONY_NIFPARSER || process.env.AIFMONY_NIFPARSER || cfg.nifparser || reg("parser");
   if (t.hexerVariant === "aowlhexer" && reg("hexer"))    t.aifhexer  = process.env.AOWLMONY_HEXER || process.env.AIFMONY_HEXER || cfg.aifhexer  || reg("hexer");
   // The line the comment on `aowlsem` above promised and this function never
   // had. Without it the registry could select sem=aowlsem and name the binary,
@@ -372,7 +375,7 @@ function warnFallbacks(t) {
 
   if ((t.parserVariant || "aowlparser") === "aowlparser") {
     if (missing(t.nifparser))
-      warn("parser", "aowlparser", C.gray("the aowlparser binary was not found (set AOWLMONY_NIFPARSER, or let aowlup select it)"), t.nifparser);
+      warn("parser", "aowlparser", C.gray("the aowlparser binary was not found (set AOWLMONY_PARSER, or let aowlup select it)"), t.nifparser);
     else if (!shimRoutingWorks()) warn("parser", "aowlparser", noShim);
   }
   if (t.semVariant === "aowlsem") {
@@ -1724,7 +1727,7 @@ function verifyCmd(b, file, absSrc, o, t) {
     say(C.amber("!") + " " + C.bold(C.amber("this may not be a backend defect — the interpreter is not the newest build")));
     say("  " + C.gray("ran    ") + C.cyan(t.nifiInterp.replace(HOME, "~")) + C.dim("  " + day(stale.resolvedMs)));
     say("  " + C.gray("newer  ") + C.cyan(stale.path.replace(HOME, "~")) + C.dim("  " + day(stale.mtimeMs)));
-    say("  " + C.gray("re-run with ") + C.teal("AOWLMONY_NIFI=" + stale.path.replace(HOME, "~")) +
+    say("  " + C.gray("re-run with ") + C.teal("AOWLMONY_INTERP=" + stale.path.replace(HOME, "~")) +
       C.gray(" before reporting this as an aowli bug"));
   };
   const provenance = () =>

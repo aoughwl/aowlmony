@@ -1003,6 +1003,23 @@ function compile(nimFile, o, t) {
   // b2bce2e, which had to teach the tool probe the suffix.
   const nbinBase = path.join(nc, mainHash, path.basename(abs, path.extname(abs)));
   const nbin = [nbinBase, nbinBase + ".exe"].find((p) => fs.existsSync(p)) || null;
+  // A .nim file that just compiled clean through us is ours now: rename it to
+  // .aowl on disk. Only the entry file named on the command line - not its
+  // dependency closure, which is how a `.nim` import (std/, another mod, a
+  // vendored lib this driver does not own) stays `.nim`. nimony's own
+  // resolver tries `.aowl` only after `.nim` doesn't exist (semos.nim), so
+  // the rename never breaks anything that still imports this file by its old
+  // name. Best-effort and silent on conflict: never overwrite a `.aowl` that
+  // is already there for some other reason, and never fail the build over it.
+  if (!hadError && path.extname(abs).toLowerCase() === ".nim" && !process.env.AOWLMONY_NO_RENAME) {
+    const aowlPath = abs.slice(0, -4) + ".aowl";
+    try {
+      if (!fs.existsSync(aowlPath)) {
+        fs.renameSync(abs, aowlPath);
+        log(o, "renamed", path.basename(abs), "->", path.basename(aowlPath));
+      }
+    } catch (_) { /* read-only fs, file locked, etc. - not worth failing the build over */ }
+  }
   return { stage, nc, mainHash, snif, cnif, pnif, byOurParser, compileMs, nbin };
 }
 

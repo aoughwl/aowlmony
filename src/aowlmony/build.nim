@@ -441,6 +441,7 @@ proc build*(entry: string, t: Tools, verbose = false,
         putEnv("AOWLSHIM_NIFLER", t.niflerReal)
         putEnv("AOWLSHIM_PARSER", t.nifparser)
         putEnv("AOWLSHIM_LIB", root & "/lib")
+        putEnv("AOWLSHIM_SRCLIB", root & "/src/lib")
       except: discard
     else:
       writeShim(st & "/nimsem", semShim(t, root & "/lib", root & "/src/lib", st))

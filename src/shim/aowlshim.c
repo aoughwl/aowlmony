@@ -356,11 +356,12 @@ static int roleNimsem(int argc, char **argv) {
   const char *real = envOr("AOWLSHIM_NIMSEM", "");
   const char *sem = envOr("AOWLSHIM_SEM", "");
   const char *lib = envOr("AOWLSHIM_LIB", "");
+  const char *srclib = envOr("AOWLSHIM_SRCLIB", "");
   const char *base = NULL, *nc = NULL, *in;
   char mode = 0;
   int seenCmd = 0, isSystem = 0, nFiles = 0, ns = 0, rc, i;
   char *files[MAXARG], *sa[MAXARG], *xa[2], *paths[MAXARG], *defs[MAXARG];
-  char out[4096], pflag[4096];
+  char out[4096], pflag[4096], pflag2[4096];
   size_t n, sl;
   int nPaths = 0, nDefs = 0;
 
@@ -415,6 +416,7 @@ static int roleNimsem(int argc, char **argv) {
     snprintf(out, sizeof(out), "%s.s.nif", in);
 
   snprintf(pflag, sizeof(pflag), "-p:%s", lib);
+  snprintf(pflag2, sizeof(pflag2), "-p:%s", srclib);
 
   sa[ns++] = (char *)"m";
   sa[ns++] = (char *)in;
@@ -422,6 +424,7 @@ static int roleNimsem(int argc, char **argv) {
   base = semBase();
   if (base) sa[ns++] = (char *)base;
   if (nc) sa[ns++] = (char *)nc;
+  if (*srclib) sa[ns++] = pflag2;
   sa[ns++] = pflag;
   for (i = 0; i < nPaths && ns < MAXARG - 2; i++) sa[ns++] = paths[i];
   for (i = 0; i < nDefs && ns < MAXARG - 2; i++) sa[ns++] = defs[i];

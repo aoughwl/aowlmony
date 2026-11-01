@@ -138,8 +138,9 @@ function generate(opts) {
     for (const p of d.imports) m.imports.push(load(resolveImport(p, file)).file);
     const addIncludes = (fromFile, list) => {
       for (const p of list) {
-        const inc = path.join(path.dirname(fromFile), p + ".nim");
-        if (!fs.existsSync(inc)) continue;                    // missing include files are ignored
+        const incCands = [path.join(path.dirname(fromFile), p + ".nim"), ...(opts.paths || []).map(d => path.join(d, p + ".nim"))];
+        const inc = incCands.find(c => fs.existsSync(c));
+        if (!inc) continue;                    // missing include files are ignored
         const im = { file: inc, name: nameOf(inc), isInclude: true };
         m.includes.push(im); includedBy.set(inc, m);
         if (opts.ensure) opts.ensure(inc, im.name);

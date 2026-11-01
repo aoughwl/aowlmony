@@ -59,8 +59,8 @@ function generateFinal(p1, opts) {
     for (const c of st.slice(1)) if (Array.isArray(c) && c[0] === "build")
       for (const t of c.slice(1)) if (Array.isArray(t) && t[0] === "tup" && t[1] && t[1].str === "C" && t[2] && t[2].str) {
         let cf = t[2].str; if (!path.isAbsolute(cf)) cf = path.join(path.dirname(m.file), cf);
-        const flags = (t[3] && t[3].str ? t[3].str : "").split(/s+/).filter(Boolean);
-        const obj = path.join(nc, m.name + "_" + path.basename(cf).replace(/.c$/, "") + ".o");
+        const flags = (t[3] && t[3].str ? t[3].str : "").split(/\s+/).filter(Boolean);
+        const obj = path.join(nc, m.name + "_" + path.basename(cf).replace(/\.c$/, "") + ".o");
         nodes.push({ tool: "cc", args: flags, inputs: [path.normalize(cf)], outputs: [obj] });
         extraObjs.push(obj);
       }

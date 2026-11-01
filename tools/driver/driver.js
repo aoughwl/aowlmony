@@ -23,7 +23,7 @@ const T = path.resolve(arg("tools-dir", path.join(__dirname, "..", "..", "..")))
 const tools = {
   parser: process.env.AOWL_PARSER || path.join(T, "aifparser", "bin", "aowlparser.exe"),
   sem: process.env.AOWL_SEM || path.join(T, "aowlsem.ghfresh", "bin", "aowlsem.exe"),   // AOWL_SEM: try a private build
-  hexer: path.join(T, "aowlhexer", "bin", "aowlhexer.exe"),
+  hexer: process.env.AOWL_HEXER || path.join(T, "aowlhexer", "bin", "aowlhexer.exe"),   // AOWL_HEXER: try a private build
   c: process.env.AOWL_C || path.join(T, "aowlc", "bin", "aowlc-native.exe"),
   cc: "gcc",
 };
@@ -83,7 +83,7 @@ function ensure(file, name) {
       case "dceLive": argv = [tools.hexer, "dl", ...H, ...n.inputs, n.outputs[0]]; break;
       case "dceEmit": argv = [tools.hexer, "de", ...H, ...n.args, n.inputs[0], n.inputs[1]]; break;
       case "lengc": argv = [tools.c, n.inputs[0]]; n = { ...n, stdoutTo: n.outputs[0] }; break;
-      case "cc": argv = [tools.cc, "-c", "-Wno-attributes", "-Wno-error=incompatible-pointer-types", "-Wno-error=int-conversion", "-O1", "-I" + path.dirname(main), ...extraPaths.map(p => "-I" + p), ...n.args, n.inputs[0], "-o", n.outputs[0]]; break;
+      case "cc": argv = [tools.cc, "-c", "-Wno-attributes", "-Wno-error=incompatible-pointer-types", "-Wno-error=int-conversion", "-O1", "-I" + path.dirname(main), ...extraPaths.map(p => "-I" + p), ...(process.env.AOWL_CFLAGS ? process.env.AOWL_CFLAGS.split(" ").filter(Boolean) : []), ...n.args, n.inputs[0], "-o", n.outputs[0]]; break;
       case "link": argv = [tools.cc, ...(process.argv.includes("--shared") ? ["-shared"] : []), "-o", n.outputs[0], ...n.inputs.filter(i => i.endsWith(".o")), "-lws2_32"]; break;
       default: throw new Error("no command for tool " + n.tool);
     }

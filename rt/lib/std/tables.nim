@@ -1,0 +1,226 @@
+
+import hashes, assertions
+
+type
+  Keyable* = concept ## Concept describing types usable as table keys (`==` plus `hash`).
+    func `==`(a, b: Self): bool
+    func hash(a: Self): Hash
+
+  HashEntry = object
+    fullhash: Hash
+    position: int # index into `data`; 1 based so that 0 means "unfilled"
+  Table*[K, V] = object ## Generic hash map storing key/value pairs (linear scan when tiny, open addressing otherwise).
+    data: seq[(K, V)]
+    hashes: seq[HashEntry]
+
+func mustRehash(length, counter: int): bool {.inline.} =
+  result = (length < counter div 2 + counter) or (length - counter < 4)
+
+func isFilled(a: HashEntry): bool {.inline.} = a.position > 0
+
+func resize(t: var seq[HashEntry]) =
+  # does not have to be generic.
+  let newLen = if t.len == 0: 4 else: t.len * 2
+  var s = newSeq[HashEntry](newLen)
+  for i in 0 ..< t.len:
+    if isFilled(t[i]):
+      var h = t[i].fullhash and high(s).uint
+      while isFilled(s[h]): h = nextTry(h, high(s))
+      s[h] = t[i]
+  t = ensureMove s
+
+const
+  HashThreshold = 4
+
+func fillHashPart[K: Keyable, V](t: var Table[K, V]) =
+  t.hashes = newSeq[HashEntry](HashThreshold*2)
+  for i in 0 ..< t.data.len:
+    let fullhash = hash(t.data[i][0])
+    var hi = fullhash and t.hashes.high.uint
+    while isFilled(t.hashes[hi]): hi = nextTry(hi, high(t.hashes))
+    t.hashes[hi] = HashEntry(fullhash: fullhash, position: i+1)
+
+func rawGet[K: Keyable, V](t: Table[K, V]; k: K; kh: Hash): int =
+  if t.data.len <= HashThreshold:
+    for i in 0 ..< t.data.len:
+      if t.data[i][0] == k: return i
+  else:
+    var h = kh and t.hashes.high.uint
+    while isFilled(t.hashes[h]):
+      let d = t.hashes[h]
+      if d.fullhash == kh and t.data[d.position-1][0] == k:
+        return d.position-1
+      h = nextTry(h, high(t.hashes))
+  result = -1
+
+func contains*[K: Keyable, V](t: Table[K, V]; k: K): bool {.inline.} =
+  ## True if `k` is stored in `t`.
+  rawGet(t, k, hash(k)) >= 0
+
+func hasKey*[K: Keyable, V](t: Table[K, V]; k: K): bool {.inline.} =
+  ## Alias for `contains`.
+  contains(t, k)
+
+func getOrDefault*[K: Keyable, V: HasDefault](t: Table[K, V]; k: K): V =
+  let idx = rawGet(t, k, hash(k))
+  if idx >= 0:
+    t.data[idx][1]
+  else:
+    default(V)
+
+func getOrDefault*[K: Keyable, V](t: Table[K, V]; k: K; fallback: V): V =
+  ## Return `t[k]` if the key is present, otherwise `fallback`.
+  let idx = rawGet(t, k, hash(k))
+  if idx >= 0:
+    t.data[idx][1]
+  else:
+    fallback
+
+func getOrQuit*[K: Keyable, V](t: Table[K, V]; k: K): var V =
+  ## Like `[]`, but terminates the program if `k` is missing (after `assert`).
+  let idx = rawGet(t, k, hash(k))
+  {.cast(noSideEffect).}:
+    assert idx >= 0
+  t.data[idx][1]
+
+when defined(nimony):
+  func `[]`*[K: Keyable, V](t: Table[K, V]; k: K): var V {.raises.} =
+    ## Retrieves `k`'s value or raises `KeyError` when absent.
+    let idx = rawGet(t, k, hash(k))
+    if idx < 0:
+      raise KeyError
+    t.data[idx][1]
+
+else:
+  func `[]`*[K, V](t: var Table[K, V]; k: K): var V {.raises.} =
+    let idx = rawGet(t, k, hash(k))
+    if idx < 0:
+      raise KeyError
+    t.data[idx][1]
+
+  func `[]`*[K, V](t: Table[K, V]; k: K): V {.raises.} =
+    let idx = rawGet(t, k, hash(k))
+    if idx < 0:
+      raise KeyError
+    t.data[idx][1]
+
+func rawPut[K: Keyable, V](t: var Table[K, V]; k: sink K; v: sink V; h: Hash) =
+  if t.data.len == HashThreshold:
+    fillHashPart t
+  elif mustRehash(t.hashes.len, t.data.len):
+    resize t.hashes
+  t.data.add (k, v)
+  var hi = h and t.hashes.high.uint
+  while isFilled(t.hashes[hi]): hi = nextTry(hi, high(t.hashes))
+  t.hashes[hi] = HashEntry(fullhash: h, position: t.data.len)
+
+func `[]=`*[K: Keyable, V](t: var Table[K, V]; k: sink K; v: sink V) =
+  ## Inserts or updates `k` with `v`.
+  let h = hash(k)
+  let idx = rawGet(t, k, h)
+  if idx >= 0:
+    t.data[idx][1] = v
+  else:
+    rawPut(t, k, v, h)
+
+func mgetOrPut*[K: Keyable, V](t: var Table[K, V]; k: sink K; v: sink V): var V =
+  ## Returns `t[k]`, inserting `v` when `k` was missing; result is mutable.
+  let h = hash(k)
+  var idx = rawGet(t, k, h)
+  if idx < 0:
+    rawPut(t, k, v, h)
+    idx = t.data.len-1
+  result = t.data[idx][1]
+
+func len*[K, V](t: Table[K, V]): int {.inline.} =
+  ## Number of key/value pairs stored in `t`.
+  t.data.len
+
+iterator pairs*[K, V](t: Table[K, V]): (lent K, lent V) =
+  ## Yields every `(key, value)` stored in `t`.
+  for i in 0 ..< t.data.len:
+    yield (t.data[i][0], t.data[i][1])
+
+iterator mpairs*[K, V](t: Table[K, V]): (lent K, var V) =
+  ## Mutable variant of `pairs` (values can be updated in place).
+  for i in 0 ..< t.data.len:
+    yield (t.data[i][0], t.data[i][1])
+
+iterator keys*[K, V](t: Table[K, V]): lent K =
+  for i in 0 ..< t.data.len:
+    yield t.data[i][0]
+
+iterator values*[K, V](t: Table[K, V]): lent V =
+  for i in 0 ..< t.data.len:
+    yield t.data[i][1]
+
+iterator mvalues*[K, V](t: var Table[K, V]): var V =
+  for i in 0 ..< t.data.len:
+    yield t.data[i][1]
+
+func del*[K: Keyable, V](t: var Table[K, V]; k: K) =
+  ## Remove `k` from `t`. No-op if absent. Preserves insertion order by
+  ## shifting later entries down; the hash index is rebuilt afterwards
+  ## because the shift renamed every entry's data position.
+  let idx = rawGet(t, k, hash(k))
+  if idx < 0: return
+  var j = idx
+  while j < t.data.len - 1:
+    let next = t.data[j+1]
+    t.data[j] = next
+    inc j
+  t.data.shrink(t.data.len - 1)
+  if t.data.len > HashThreshold:
+    # `rawGet` does NOT rebuild lazily: when `data.len > HashThreshold`
+    # it indexes into `t.hashes` directly, so leaving `hashes = @[]`
+    # turns the next lookup into an out-of-bounds read. Rebuild the
+    # hash table sized to fit the current data.len. We can't just call
+    # `fillHashPart` because it hardcodes size = `HashThreshold*2`,
+    # which is too small once data has grown past 8 entries — the
+    # probe loop would never terminate.
+    var size = HashThreshold * 2
+    while size < t.data.len * 2:
+      size = size * 2
+    t.hashes = newSeq[HashEntry](size)
+    for i in 0 ..< t.data.len:
+      let fullhash = hash(t.data[i][0])
+      var hi = fullhash and t.hashes.high.uint
+      while isFilled(t.hashes[hi]): hi = nextTry(hi, high(t.hashes))
+      t.hashes[hi] = HashEntry(fullhash: fullhash, position: i+1)
+  else:
+    # data fits the linear-scan threshold; drop the hash table entirely.
+    t.hashes.shrink(0)
+
+func initTable*[K, V](): Table[K, V] =
+  ## Creates an empty table.
+  Table[K, V](data: @[], hashes: @[])
+
+func clear*[K, V](t: var Table[K, V]) =
+  ## Remove all entries from `t`.
+  t.data.shrink(0)
+  t.hashes = @[]
+
+# Nimony's `Table` is already insertion-ordered (`data` is a `seq`), so
+# `OrderedTable` is a simple alias for portability with code written
+# against the Nim stdlib split.
+type
+  OrderedTable*[K, V] = Table[K, V]
+
+func initOrderedTable*[K, V](): OrderedTable[K, V] {.inline.} = initTable[K, V]()
+
+when isMainModule:
+  import std/syncio
+
+  var tab: Table[string, int] = initTable[string, int]()
+  for i in 0..<1000:
+    tab[$i] = i
+    assert hasKey(tab, $i)
+    assert not hasKey(tab, $(i+1))
+    assert tab[$i] == i
+  #echo tab.data
+  #echo tab.hashes
+  assert tab.hasKey("100")
+  echo tab.getOrDefault("500")
+  echo tab["600"]
+  tab.mgetOrPut("abc", -12) = -24
+  echo tab["abc"]

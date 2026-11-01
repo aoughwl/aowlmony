@@ -1,0 +1,281 @@
+import strutils
+import posix/posix
+import cmdline
+import envvars
+import oserrors
+import private/[ospaths2, osappdirs, oscommons]
+
+export cmdline
+export ospaths2
+export osappdirs
+export oscommons
+
+when not defined(nimNativeIo):
+  proc c_system(cmd: cstring): cint {.
+      importc: "system", header: "<stdlib.h>".}
+
+when defined(posix):
+  proc expandFilename*(filename: string): string {.raises.} =
+    ## Returns the full (`absolute`) path of an existing file `filename`,
+    ## resolving symlinks. Raises `OSError` if `filename` does not exist.
+    when defined(nimNativeIo):
+      # Libc-free: there is no `realpath` (it is a libc routine, not a syscall).
+      # Do a LEXICAL canonicalization instead — absolutize against the cwd and
+      # collapse `.`/`..`/`//`. Unlike `realpath` this does NOT follow symlinks,
+      # which is sufficient for the compiler's source-path use. The existence
+      # check is preserved so the documented `OSError`-on-missing contract holds.
+      if not (fileExists(filename) or dirExists(filename)):
+        raiseOSError(osLastError(), filename)
+      result = normalizedPath(absolutePath(filename))
+    else:
+      const PATH_MAX = 4096
+      result = newString(PATH_MAX)
+      var filename = filename
+      let r = realpath(filename.toCString, result.toCString)
+      if r.isNil:
+        raiseOSError(osLastError(), filename)
+      else:
+        var L = 0
+        while L < PATH_MAX and result[L] != '\0':
+          inc L
+        setLen(result, L)
+else:
+  proc expandFilename*(filename: string): string {.raises.} =
+    result = absolutePath(filename)
+
+when defined(linux) or defined(aix):
+  const maxSymlinkLen = 1024
+
+  proc getApplAux(procPath: string): string =
+    result = newString(maxSymlinkLen)
+    var procPath = procPath
+    var len = readlink(procPath.toCString, result.toCString, maxSymlinkLen)
+    if len > maxSymlinkLen:
+      result = newString(len+1)
+      len = readlink(procPath.toCString, result.toCString, len)
+    if len < 0:
+      len = 0
+    setLen(result, len)
+
+when supportedSystem:
+  proc getAppFilename*(): string {.tags: [ReadIOEffect], raises: [].} =
+    when defined(linux) or defined(aix):
+      result = getApplAux("/proc/self/exe")
+    else:
+      result = paramStr(0)
+
+  proc getAppDir*(): string {.tags: [ReadIOEffect].} =
+    result = splitFile(getAppFilename()).dir
+
+func quoteShellWindows*(s: string): string {.noSideEffect.} =
+  ## Quote `s`, so it can be safely passed to Windows API.
+  ##
+  ## Based on Python's `subprocess.list2cmdline`.
+  ## See `this link <https://msdn.microsoft.com/en-us/library/17w5ykft.aspx>`_
+  ## for more details.
+  let needQuote = s.contains({' ', '\t'}) or s.len == 0
+  result = ""
+  var backslashBuff = ""
+  if needQuote:
+    result.add("\"")
+
+  for c in s:
+    if c == '\\':
+      backslashBuff.add(c)
+    elif c == '\"':
+      for i in 0..<backslashBuff.len*2:
+        result.add('\\')
+      backslashBuff.setLen(0)
+      result.add("\\\"")
+    else:
+      if backslashBuff.len != 0:
+        result.add(backslashBuff)
+        backslashBuff.setLen(0)
+      result.add(c)
+
+  if backslashBuff.len > 0:
+    result.add(backslashBuff)
+  if needQuote:
+    result.add(backslashBuff)
+    result.add("\"")
+
+
+func quoteShellPosix*(s: string): string {.noSideEffect.} =
+  ## Quote ``s``, so it can be safely passed to POSIX shell.
+  const safeUnixChars = {'%', '+', '-', '.', '/', '_', ':', '=', '@',
+                         '0'..'9', 'A'..'Z', 'a'..'z'}
+  if s.len == 0:
+    result = "''"
+  elif s.allCharsInSet(safeUnixChars):
+    result = s
+  else:
+    result = "'" & s.replace("'", "'\"'\"'") & "'"
+
+when defined(windows) or defined(posix) or defined(nintendoswitch):
+  func quoteShell*(s: string): string {.noSideEffect.} =
+    ## Quote ``s``, so it can be safely passed to shell.
+    ##
+    ## When on Windows, it calls `quoteShellWindows func`_.
+    ## Otherwise, calls `quoteShellPosix func`_.
+    when defined(windows):
+      result = quoteShellWindows(s)
+    else:
+      result = quoteShellPosix(s)
+
+  func quoteShellCommand*(args: openArray[string]): string =
+    ## Concatenates and quotes shell arguments `args`.
+    runnableExamples:
+      when defined(posix):
+        assert quoteShellCommand(["aaa", "", "c d"]) == "aaa '' 'c d'"
+      when defined(windows):
+        assert quoteShellCommand(["aaa", "", "c d"]) == "aaa \"\" \"c d\""
+
+    # can't use `map` pending https://github.com/nim-lang/Nim/issues/8303
+    result = ""
+    for i in 0..<args.len:
+      if i > 0: result.add " "
+      result.add quoteShell(args[i])
+
+when defined(posix):
+  proc getLastModificationTime*(file: string): int64 {.raises.} =
+    ## Returns the file's last modification time as nanoseconds since the
+    ## Unix epoch (1970-01-01 UTC). Raises `OSError` if the file does not
+    ## exist or cannot be stat'ed.
+    var s = default(Stat)
+    var filename = file
+    if stat(filename.toCString, s) < 0:
+      raiseOSError(osLastError(), file)
+    result = int64(s.st_mtim.tv_sec) * 1_000_000_000'i64 + int64(s.st_mtim.tv_nsec)
+elif defined(windows):
+  import windows/winlean
+
+  const
+    # Number of 100-nanosecond intervals between 1601-01-01 and 1970-01-01.
+    winEpochDiff: int64 = 116444736000000000'i64
+
+  proc rdFileTime(f: FILETIME): int64 {.inline.} =
+    result = int64(cast[uint32](f.dwLowDateTime)) or
+             (int64(cast[uint32](f.dwHighDateTime)) shl 32)
+
+  proc rdFileSize(f: WIN32_FIND_DATA): int64 {.inline.} =
+    result = int64(cast[uint32](f.nFileSizeLow)) or
+             (int64(cast[uint32](f.nFileSizeHigh)) shl 32)
+
+  proc getLastModificationTime*(file: string): int64 {.raises.} =
+    ## Returns the file's last modification time as nanoseconds since the
+    ## Unix epoch (1970-01-01 UTC). Raises `OSError` if the file does not
+    ## exist or cannot be queried.
+    var f {.noinit.}: WIN32_FIND_DATA
+    let h = findFirstFile(file, f)
+    if h == INVALID_HANDLE_VALUE:
+      raiseOSError(osLastError(), file)
+    # FILETIME is in 100ns intervals since 1601-01-01; rebase to ns since epoch.
+    result = (rdFileTime(f.ftLastWriteTime) - winEpochDiff) * 100'i64
+    discard findClose(h)
+
+proc exitStatusLikeShell*(status: cint): cint =
+  ## Converts exit code from `c_system` into a shell exit code.
+  when defined(posix):
+    if WIFSIGNALED(status):
+      # like the shell!
+      128 + WTERMSIG(status)
+    else:
+      WEXITSTATUS(status)
+  else:
+    status
+
+proc findExe*(exe: string): string {.tags: [ReadDirEffect, ReadEnvEffect].} =
+  ## Searches for `exe` in the directories listed in the PATH environment
+  ## variable (and, on POSIX, in the current directory if `exe` contains a
+  ## path separator). Returns `""` if the exe cannot be found.
+  result = ""
+  if exe.len == 0: return
+  let withExt = addFileExt(exe, ExeExt)
+  when defined(posix):
+    if '/' in exe:
+      if fileExists(withExt): return withExt
+  else:
+    if fileExists(withExt): return withExt
+  let path = getEnv("PATH")
+  for candidate in split(path, PathSep):
+    if candidate.len == 0: continue
+    when defined(windows):
+      let dir =
+        if candidate[0] == '"' and candidate[^1] == '"':
+          substr(candidate, 1, candidate.len-2)
+        else:
+          candidate
+    else:
+      let dir = candidate
+    let x = addFileExt(dir / exe, ExeExt)
+    if fileExists(x): return x
+  result = ""
+
+proc execShellCmd*(command: string): int {.tags: [ExecIOEffect].} =
+  ## Executes a `shell command`:idx:.
+  ##
+  ## Command has the form 'program args' where args are the command
+  ## line arguments given to program. The proc returns the error code
+  ## of the shell when it has finished (zero if there is no error).
+  ## The proc does not return until the process has finished.
+  ##
+  ## To execute a program without having a shell involved, use `osproc.execProcess proc
+  ## <osproc.html#execProcess,string,string,openArray[string],StringTableRef,set[ProcessOption]>`_.
+  ##
+  ## **Examples:**
+  ##   ```Nim
+  ##   discard execShellCmd("ls -la")
+  ##   ```
+  when defined(nimNativeIo) and defined(posix):
+    # Freestanding: there is no libc `system()` (it is not a syscall). Replicate
+    # it as fork + execve of `/bin/sh -c command` + waitpid, inheriting the
+    # parent's standard streams — exactly what glibc's `system()` does, and the
+    # same fork+exec path osproc.execCmd already uses. `os` can't import osproc
+    # (circular), so the sequence is inlined here.
+    var sh = "/bin/sh"
+    var dashc = "-c"
+    var cmd = command
+    let argv = cast[ptr UncheckedArray[cstring]](alloc0(4 * sizeof(cstring)))
+    argv[0] = sh.toCString
+    argv[1] = dashc.toCString
+    argv[2] = cmd.toCString
+    argv[3] = nil.cstring
+    let pid = fork()
+    if pid == Pid(0):
+      # child: exec the shell; only reached past here if exec failed.
+      discard execve(sh.toCString, cast[CCharArray](argv),
+                     cast[CCharArray](posix_environ))
+      exitnow(127'i32)
+    dealloc(cast[pointer](argv))
+    if pid.int < 0:
+      result = -1   # fork failed, like `system()`
+    else:
+      var status: cint = 0'i32
+      if waitpid(pid, status, 0'i32).int < 0:
+        result = -1
+      else:
+        result = exitStatusLikeShell(status)
+  else:
+    var command = command
+    let cc = command.toCString()
+    if cc.isNil:
+      result = -202 # OOM
+    else:
+      result = exitStatusLikeShell(c_system(cc))
+
+proc getFileSize*(file: string): int64 {.tags: [ReadIOEffect], raises.} =
+  ## Returns the file size of `file` (in bytes).
+  when defined(windows):
+    var a {.noinit.}: WIN32_FIND_DATA
+    let resA = findFirstFile(file, a)
+    if resA == INVALID_HANDLE_VALUE: raiseOSError(osLastError(), file)
+    try:
+      result = rdFileSize(a)
+    finally:
+      discard findClose(resA)
+  else:
+    var rawInfo = default(Stat)
+    var filename = file
+    if stat(filename.toCString, rawInfo) < 0'i32:
+      raiseOSError(osLastError(), file)
+    result = int64(rawInfo.st_size)

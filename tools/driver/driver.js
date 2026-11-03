@@ -3,6 +3,9 @@
 //        [--tools-dir DIR]  (DIR holding aowlparser/aowlsem/aowlhexer/aowlc; default: sibling checkouts)
 // No call is made to the previous stack's driver or tools.
 const fs = require("fs"), path = require("path"), cp = require("child_process");
+// Runtime checks the hexer lowers in: AOWL_CHECKS (default "br" = bounds and range; "" = none; other flag letters pass through).
+// An unknown letter is ignored, so AOWL_CHECKS=- also means none; use that from PowerShell, where setting a variable to "" deletes it.
+const CHECKS = process.env.AOWL_CHECKS === undefined ? "br" : process.env.AOWL_CHECKS;
 const { generate, parseNif } = require("./graph.js");
 const { generateFinal } = require("./graph2.js");
 const { extract } = require("./deps_extract.js");
@@ -80,7 +83,7 @@ function ensure(file, name) {
     if (n.tool === "lengc") n = { ...n, inputs: [n.inputs[0], ...allCnif.filter(x => x !== n.inputs[0])] };
     let argv;
     switch (n.tool) {
-      case "hexer": argv = [tools.hexer, "c", ...H, "--flags:br", ...n.args, n.inputs[0]]; break;
+      case "hexer": argv = [tools.hexer, "c", ...H, ...(CHECKS ? ["--flags:" + CHECKS] : []), ...n.args, n.inputs[0]]; break;
       case "dceLive": argv = [tools.hexer, "dl", ...H, ...n.inputs, n.outputs[0]]; break;
       case "dceEmit": argv = [tools.hexer, "de", ...H, ...n.args, n.inputs[0], n.inputs[1]]; break;
       case "lengc": argv = [tools.c, n.inputs[0]]; n = { ...n, stdoutTo: n.outputs[0] }; break;

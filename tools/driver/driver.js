@@ -58,6 +58,7 @@ function ensure(file, name) {
     const pnif = n.args[n.args.length - 1];
     const argv = [tools.sem, "m", pnif, n.outputs[0], "--base:" + cwd, "--nimcache:" + nc, "-p:" + lib, ...extraPaths.map(p => "-p:" + p), ...userDefines.map(x => "-d:" + x)];
     if (n.args.includes("--isSystem")) argv.push("--noSystem");
+    if (n.outputs[0].split("\\").join("/").endsWith("/" + p1.mainName + ".s.nif")) argv.push("--ismain");   // `when isMainModule` of the program's main module
     return { ...n, argv, cwd };
   });
   say(`phase 1: ${nodes1.length} sem nodes`);
@@ -83,8 +84,8 @@ function ensure(file, name) {
       case "dceLive": argv = [tools.hexer, "dl", ...H, ...n.inputs, n.outputs[0]]; break;
       case "dceEmit": argv = [tools.hexer, "de", ...H, ...n.args, n.inputs[0], n.inputs[1]]; break;
       case "lengc": argv = [tools.c, n.inputs[0]]; n = { ...n, stdoutTo: n.outputs[0] }; break;
-      case "cc": argv = [tools.cc, "-c", "-Wno-attributes", "-Wno-error=incompatible-pointer-types", "-Wno-error=int-conversion", "-O1", "-I" + path.dirname(main), ...extraPaths.map(p => "-I" + p), ...(process.env.AOWL_CFLAGS ? process.env.AOWL_CFLAGS.split(" ").filter(Boolean) : []), ...n.args, n.inputs[0], "-o", n.outputs[0]]; break;
-      case "link": argv = [tools.cc, ...(process.argv.includes("--shared") ? ["-shared"] : []), "-o", n.outputs[0], ...n.inputs.filter(i => i.endsWith(".o")), "-lws2_32"]; break;
+      case "cc": argv = [tools.cc, "-c", "-Wno-attributes", "-Wno-error=incompatible-pointer-types", "-Wno-error=int-conversion", "-O1", "-I" + path.dirname(main), ...extraPaths.map(p => "-I" + p), ...(process.env.AOWL_CFLAGS ? process.env.AOWL_CFLAGS.split(" ").filter(Boolean) : []), ...p2.passC, ...n.args, n.inputs[0], "-o", n.outputs[0]]; break;
+      case "link": argv = [tools.cc, ...(process.argv.includes("--shared") ? ["-shared"] : []), "-o", n.outputs[0], ...n.inputs.filter(i => i.endsWith(".o")), ...p2.passL, "-lws2_32"]; break;
       default: throw new Error("no command for tool " + n.tool);
     }
     return { ...n, argv, cwd };

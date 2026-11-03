@@ -15,6 +15,7 @@ function generateFinal(p1, opts) {
   const idx = m => path.join(nc, m.name + ".s.idx.nif");
   const byFile = new Map(modules.map(m => [m.file, m]));
   const nodes = [];
+  const passL = [], passC = [];
 
   for (const m of modules) {                                 // lowering
     const isMain = m === mainMod;
@@ -27,6 +28,8 @@ function generateFinal(p1, opts) {
     if (m === sys) add(sys);                                   // the system module also lowers against its own interface
     if (fs.existsSync(sd)) {
       const st = parseNif(fs.readFileSync(sd, "utf8")).find(t => Array.isArray(t) && t[0] === "stmts");
+      for (const c of st.slice(1)) if (Array.isArray(c) && (c[0] === "passL" || c[0] === "passC"))   // link / compile flags a module asks for
+        for (const f of c.slice(1)) if (f && f.str) (c[0] === "passL" ? passL : passC).push(...f.str.split(/\s+/).filter(Boolean));
       for (const c of st.slice(1)) if (Array.isArray(c) && c[0] === "import")
         for (const f of c.slice(1)) { let file = path.normalize(f.str);
           if (remap && file.toLowerCase().startsWith(path.normalize(remap.from).toLowerCase())) file = path.normalize(remap.to) + file.slice(path.normalize(remap.from).length); add(byFile.get(file) || includedBy.get(file)); }
@@ -69,6 +72,6 @@ function generateFinal(p1, opts) {
   nodes.push({ tool: "link", args: [],
     inputs: [inDir(mainMod, ".linkmanifest.nif"), staticObj, ...extraObjs, ...[mainMod, ...modules.filter(m => m !== mainMod)].map(m => inDir(m, ".o"))],
     outputs: [path.join(dir, exeName)] });
-  return { nodes };
+  return { nodes, passL: [...new Set(passL)], passC: [...new Set(passC)] };
 }
 module.exports = { generateFinal };

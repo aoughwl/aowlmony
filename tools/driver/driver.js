@@ -16,7 +16,7 @@ const main = path.resolve(process.argv[2] || "");
 const cwd = path.resolve(arg("cwd", process.cwd()));
 const lib = path.resolve(arg("lib", ""));
 const nc = path.resolve(arg("nc", ""));
-const exeName = arg("exe", path.basename(main, ".nim") + ".exe");
+const exeName = arg("exe", path.basename(main).replace(/\.(aowl|nim)$/, "") + ".exe");
 const winPath = p => /^\/[a-zA-Z]\//.test(p) ? p[1].toUpperCase() + ":" + p.slice(2) : p;   // MSYS-style /c/x -> C:/x
 const extraPaths = (arg("path", "") || "").split(",").filter(Boolean).map(p => path.resolve(winPath(p)));   // more import roots
 const userDefines = ["aowlmony", ...(arg("define", "") || "").split(",").filter(Boolean)];   // -d: symbols for every module
@@ -30,6 +30,7 @@ const tools = {
   c: process.env.AOWL_C || path.join(T, "aowlc", "bin", "aowlc-native.exe"),
   cc: "gcc",
 };
+const SEM_IS_NIMSEM = /^nimsem(\.exe)?$/i.test(path.basename(tools.sem));
 const verbose = process.argv.includes("-v");
 const say = m => verbose && console.log(m);
 fs.mkdirSync(nc, { recursive: true });
@@ -59,9 +60,17 @@ function ensure(file, name) {
   const p1 = generate({ main, cwd, lib, nc, defines, ensure, paths: extraPaths });
   const nodes1 = p1.nodes.filter(n => n.tool === "nimsem").map(n => {
     const pnif = n.args[n.args.length - 1];
+    const isMain = n.outputs[0].split("\\").join("/").endsWith("/" + p1.mainName + ".s.nif");
+    if (SEM_IS_NIMSEM) {
+      // the root's nimsem (AOWL_SEM=<aowlmony root>\bin\nimsem.exe): options first, then `m [--isSystem|--isMain] <p.nif>`;
+      // it writes <name>.s.nif and <name>.s.idx.nif beside the input. It resolves .aowl modules, which aowlsem does not yet.
+      const flags = n.args.includes("--isSystem") ? ["--isSystem"] : isMain ? ["--isMain"] : [];
+      const argv = [tools.sem, "--base:" + cwd, "--nimcache:" + nc, "-p:" + lib, ...extraPaths.map(p => "-p:" + p), ...userDefines.map(x => "-d:" + x), "m", ...flags, pnif];
+      return { ...n, argv, cwd };
+    }
     const argv = [tools.sem, "m", pnif, n.outputs[0], "--base:" + cwd, "--nimcache:" + nc, "-p:" + lib, ...extraPaths.map(p => "-p:" + p), ...userDefines.map(x => "-d:" + x)];
     if (n.args.includes("--isSystem")) argv.push("--noSystem");
-    if (n.outputs[0].split("\\").join("/").endsWith("/" + p1.mainName + ".s.nif")) argv.push("--ismain");   // `when isMainModule` of the program's main module
+    if (isMain) argv.push("--ismain");   // `when isMainModule` of the program's main module
     return { ...n, argv, cwd };
   });
   say(`phase 1: ${nodes1.length} sem nodes`);
@@ -74,7 +83,7 @@ function ensure(file, name) {
   const staticC = path.join(lib, "..", "vendor", "mimalloc", "src", "static.c");
   const staticInc = path.join(lib, "..", "vendor", "mimalloc", "include");
   const staticObj = path.join(nc, "static.o");
-  const p2 = generateFinal(p1, { nc, exeName, staticC, staticInclude: staticInc, staticObj });
+  const p2 = generateFinal(p1, { nc, exeName, staticC, staticInclude: staticInc, staticObj, base: cwd });
   const H = ["--bits:64", "--cpu:le"];
   // aowlc resolves foreign symbols (module inits, imported procs and types) by reading the
   // sibling .c.nif files, so a module's C emit must wait for every module's .c.nif.

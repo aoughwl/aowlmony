@@ -7,7 +7,7 @@ const { parseNif } = require("./graph.js");
 // opts: { nc, exeName, staticC, staticInclude, staticObj }
 //   staticC is emitted exactly as given (the oracle keeps it relative to the driver cwd).
 function generateFinal(p1, opts) {
-  const { nc, exeName, staticC, staticInclude, staticObj, remap } = opts;   // remap {from,to}: a directory moved since the deps were written
+  const { nc, exeName, staticC, staticInclude, staticObj, remap, base } = opts;   // base: the sem --base dir   // remap {from,to}: a directory moved since the deps were written
   const { modules, mainMod, sys, includedBy } = p1;
   const dir = path.join(nc, mainMod.name);               // <nc>/<main>/
   const at = (m, ext) => (m === mainMod ? path.join(dir, m.name + ext) : path.join(nc, m.name + ext));
@@ -60,8 +60,10 @@ function generateFinal(p1, opts) {
     if (!fs.existsSync(sd)) continue;
     const st = parseNif(fs.readFileSync(sd, "utf8")).find(t => Array.isArray(t) && t[0] === "stmts");
     for (const c of st.slice(1)) if (Array.isArray(c) && c[0] === "build")
-      for (const t of c.slice(1)) if (Array.isArray(t) && t[0] === "tup" && t[1] && t[1].str === "C" && t[2] && t[2].str) {
-        let cf = t[2].str; if (!path.isAbsolute(cf)) cf = path.join(path.dirname(m.file), cf);
+      for (const t of c.slice(1)) if (Array.isArray(t) && String(t[0]).split("@")[0] === "tup" && t[1] && t[1].str === "C" && t[2] && t[2].str) {
+        let cf = t[2].str;
+        // aowlsem writes the file relative to the module's directory; nimsem relative to its --base directory
+        if (!path.isAbsolute(cf)) { const own = path.join(path.dirname(m.file), cf); cf = (!base || fs.existsSync(own)) ? own : path.join(base, cf); }
         const flags = (t[3] && t[3].str ? t[3].str : "").split(/\s+/).filter(Boolean);
         const obj = path.join(nc, m.name + "_" + path.basename(cf).replace(/\.c$/, "") + ".o");
         nodes.push({ tool: "cc", args: flags, inputs: [path.normalize(cf)], outputs: [obj] });

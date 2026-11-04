@@ -44,6 +44,7 @@ function parseNif(text) {
 }
 
 // ---- deps -----------------------------------------------------------------
+const SOURCE_EXTS = [".aowl", ".nim"];
 function flatPath(n) {            // (infix / std syncio) -> "std/syncio"
   if (typeof n === "string") return n;
   if (n.str !== undefined) return n.str;
@@ -122,7 +123,8 @@ function generate(opts) {
   const mods = new Map();           // file -> {file, name, imports:[file], includes:[file]}
   const order = [];
   function resolveImport(p, from) {
-    const cands = [path.join(lib, p + ".nim"), path.join(path.dirname(from), p + ".nim"), ...(opts.paths || []).map(d => path.join(d, p + ".nim"))];
+    // A module is `<name>.aowl`; the standard library is still `<name>.nim`. Each directory is asked for both, .aowl first.
+    const cands = [lib, path.dirname(from), ...(opts.paths || [])].flatMap(d => SOURCE_EXTS.map(e => path.join(d, p + e)));
     const hit = cands.find(c => fs.existsSync(c));
     if (!hit) throw new Error(`cannot resolve import '${p}' from ${from}; tried:\n  ` + cands.join("\n  "));
     return hit;
@@ -138,7 +140,7 @@ function generate(opts) {
     for (const p of d.imports) m.imports.push(load(resolveImport(p, file)).file);
     const addIncludes = (fromFile, list) => {
       for (const p of list) {
-        const incCands = [path.join(path.dirname(fromFile), p + ".nim"), ...(opts.paths || []).map(d => path.join(d, p + ".nim"))];
+        const incCands = [path.dirname(fromFile), ...(opts.paths || [])].flatMap(d => SOURCE_EXTS.map(e => path.join(d, p + e)));
         const inc = incCands.find(c => fs.existsSync(c));
         if (!inc) continue;                    // missing include files are ignored
         const im = { file: inc, name: nameOf(inc), isInclude: true };

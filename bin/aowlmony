@@ -158,6 +158,7 @@ function exeVariants(c) { return EXE && !c.endsWith(EXE) ? [c, c + EXE] : [c]; }
 // was expected. Nothing else reads this; it exists to make a miss legible.
 const PROBE_TRIED = new Map();
 function triedPaths(resolved) { return PROBE_TRIED.get(resolved) || []; }
+const ROOT_BIN = path.join(__dirname, "..", "root", "bin");
 function firstExisting(cands) {
   for (const c of cands) if (c) for (const v of exeVariants(c)) if (fs.existsSync(v)) return v;
   const last = cands[cands.length - 1];
@@ -260,12 +261,14 @@ function resolveTools() {
     process.env[env] || (legacy && process.env[legacy]) ||
     process.env[env.replace(/^AOWLMONY_/, "AIFMONY_")] || cfg[key] || def;
   const t = {
-    nimony:    pick("AOWLMONY_NIMONY",    "nimony",    firstExisting([path.join(HOME, "nimony/bin/nimony")])),
-    niflerReal:pick("AOWLMONY_NIFLER",    "nifler",    firstExisting([path.join(HOME, "nimony/bin/nifler")])),
+    // The staged compiler root (tools/stage-root.ps1) comes first: its driver is
+    // `aowlmony`, and nothing outside this tree has to exist.
+    nimony:    pick("AOWLMONY_NIMONY",    "nimony",    firstExisting([path.join(ROOT_BIN, "aowlmony"), path.join(HOME, "nimony/bin/nimony")])),
+    niflerReal:pick("AOWLMONY_NIFLER",    "nifler",    firstExisting([path.join(ROOT_BIN, "nifler"), path.join(HOME, "nimony/bin/nifler")])),
     // real nimsem — used ONLY as the mechanical `.s.nif → .s.idx.nif` indexer
     // (the `x`/GenerateIdx subcommand walks the sem'd NIF; it does NO semantic
     // analysis) when OUR aowlsem does the actual semchecking. See semShimScript.
-    nimsemReal:pick("AOWLMONY_NIMSEM",    "nimsem",    firstExisting([path.join(HOME, "nimony/bin/nimsem")])),
+    nimsemReal:pick("AOWLMONY_NIMSEM",    "nimsem",    firstExisting([path.join(ROOT_BIN, "nimsem"), path.join(HOME, "nimony/bin/nimsem")])),
     // OUR semantic checker (aowlsem). Injected via a `nimsem` shim only when the
     // active profile selects the aowlsem variant; see compile().
     // NB: do NOT seed this from reg("sem") — the registry's sem slot holds the

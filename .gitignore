@@ -28,3 +28,6 @@ dist/
 # files of compiler scratch, referenced by nothing, in a public repo — and one
 # path carried a local scratchpad session id.
 examples/nimcache/
+
+# staged compiler root (tools/stage-root.ps1)
+/root/

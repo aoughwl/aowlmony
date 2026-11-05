@@ -500,7 +500,10 @@ else:
     while fgets(buf, bufsize.int32, f) != nil:
       result = true
       var done = false
-      for i in 0 ..< bufsize:
+      # fgets stores at most bufsize-1 chars and then a NUL; a longer line goes on
+      # in the next chunk, so stop at the NUL instead of adding it to the line.
+      for i in 0 ..< bufsize - 1:
+        if buf[i] == '\0': break
         if buf[i] == '\n':
           done = true
           break

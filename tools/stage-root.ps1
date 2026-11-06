@@ -1,5 +1,5 @@
 # Stage the aowlmony compiler root: the layout the compiler driver expects
-# beside itself, built from source into a fresh directory.
+# beside itself, assembled from the aowlmony repos and a seed root.
 #
 #   <Root>\bin\aowlmony.exe      the driver (c / check / --app:lib / -p: / -d: ...)
 #   <Root>\bin\nimsem.exe ...    the per-module tools it starts (parser, sem,
@@ -13,73 +13,49 @@
 #   <Root>\lib                   standard library   (from rt\lib)
 #   <Root>\vendor\mimalloc       allocator sources  (from rt\vendor)
 #   <Root>\src                   compiler-internal library modules that std/macros
-#                                and the Jester native host import (from -CompilerSrc)
+#                                and the Jester native host import (from the seed)
 #   <Root>\nimcache_static       written by the driver at build time
 #
+# INPUTS
+#   -Seed      a root that already holds the per-module compiler tools (bin\*.exe
+#              other than hexer/nifmake) and the compiler-internal src tree.
+#              Default: -Root itself, i.e. restaging in place keeps those tools.
+#   -Hexer     the lowering pass, built from the aowlhexer repo
+#              (aowlhexer\tools\selfbuild.sh), default aowlhexer\bin\aowlhexer.exe.
+#   -CcBin     the C compiler directory (mingw-w64 ucrt) used to build nifmake.
+#   The standard library and allocator come from this repo's rt\.
+#
 # Nothing here is a junction or symlink: every file is copied, so a cleanup of
-# the root can never delete through into a checkout.
+# the root can never delete through into a checkout. Keep a backup of the old
+# root outside it before restaging.
 #
 # USE
-#   powershell -NoProfile -File tools\stage-root.ps1               # build everything
-#   powershell -NoProfile -File tools\stage-root.ps1 -Tools aowlmony,nimsem
-#
-# The compiler sources are the toolchain fork checkout (-CompilerSrc, default the
-# sibling `nimony` directory); they are compiled with the bootstrap compiler
-# found under ~\.choosenim (-NimBin). Builds are debug builds, matching the
-# binaries the Jester tools have been using, unless -Release is passed.
+#   powershell -NoProfile -File tools\stage-root.ps1
+#   powershell -NoProfile -File tools\stage-root.ps1 -Seed <old root> -Root <new root>
 
 param(
   [string]$Root = (Join-Path (Split-Path $PSScriptRoot -Parent) 'root'),
-  [string]$CompilerSrc = (Join-Path (Split-Path (Split-Path $PSScriptRoot -Parent) -Parent) 'nimony'),
+  [string]$Seed = '',
   [string]$Hexer = (Join-Path (Split-Path (Split-Path $PSScriptRoot -Parent) -Parent) 'aowlhexer\bin\aowlhexer.exe'),
-  [string]$NimBin = (Join-Path $env:USERPROFILE '.choosenim\toolchains\nim-2.2.2\bin'),
-  [string]$CcBin = 'C:\msys64\ucrt64\bin',
-  [string[]]$Tools = @(),
-  [switch]$Release
+  [string]$CcBin = 'C:\msys64\ucrt64\bin'
 )
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path $PSScriptRoot -Parent
+if ($Seed -eq '') { $Seed = $Root }
+New-Item -ItemType Directory -Force $Root | Out-Null
+$inPlace = ((Resolve-Path $Seed).Path.TrimEnd('\') -ieq (Resolve-Path $Root).Path.TrimEnd('\'))
 
-# name in <Root>\bin  ->  source module (relative to -CompilerSrc)
-$all = [ordered]@{
-  'aowlmony'  = 'src\nimony\nimony.nim'
-  'nimsem'    = 'src\nimony\nimsem.nim'
-  'nifler'    = 'src\nifler\nifler.nim'
-  'lengc'     = 'src\lengc\lengc.nim'
-  'shoggoth'  = 'src\lengc\shoggoth\shoggoth.nim'
-  'niflink'   = 'src\niflink\niflink.nim'
-  'nj'        = 'src\njvl\nj.nim'
-  'vl'        = 'src\njvl\vl.nim'
-  'validator' = 'src\validator\validator.nim'
-  'dagon'     = 'src\dagon\dagon.nim'
-  'pnak'      = 'src\pnak\pnak.nim'
-}
-if ($Tools.Count -eq 0) { $Tools = @($all.Keys) + 'nifmake' }
+# per-module tools carried from the seed
+$seedTools = 'aowlmony', 'nimsem', 'nifler', 'lengc', 'shoggoth', 'niflink', 'nj', 'vl', 'validator', 'dagon', 'pnak'
 
-foreach ($d in @($CompilerSrc, $NimBin, $CcBin)) { if (-not (Test-Path $d)) { throw "missing: $d" } }
+foreach ($d in @($Seed, $CcBin)) { if (-not (Test-Path $d)) { throw "missing: $d" } }
 if (-not (Test-Path $Hexer)) { throw "no aowlhexer at $Hexer" }
+foreach ($t in $seedTools) { if (-not (Test-Path (Join-Path $Seed "bin\$t.exe"))) { throw "seed has no bin\$t.exe" } }
+if (-not (Test-Path (Join-Path $Seed 'src'))) { throw "seed has no src" }
 $bin = Join-Path $Root 'bin'
 New-Item -ItemType Directory -Force $bin | Out-Null
 $cache = Join-Path $env:TEMP 'aowlmony-stage-root'
-$env:PATH = "$CcBin;$NimBin;" + $env:PATH
-
-Push-Location $CompilerSrc
-try {
-  foreach ($t in $Tools) {
-    if ($t -eq 'nifmake') { continue }   # built by aowlmony below
-    if (-not $all.Contains($t)) { throw "unknown tool: $t" }
-    $out = Join-Path $bin "$t.exe"
-    $nimArgs = @('c')
-    if ($Release) { $nimArgs += '-d:release' }
-    $nimArgs += @('--warningAsError:ProveInit:off', '--warningAsError:Uninit:off', '--hints:off', '--warnings:off',
-               "--nimcache:$cache\$t", "-o:$out", $all[$t])
-    Write-Output "building $t"
-    & nim @nimArgs
-    if ($LASTEXITCODE -ne 0) { throw "build of $t failed ($LASTEXITCODE)" }
-  }
-} finally { Pop-Location }
-
-Copy-Item $Hexer (Join-Path $bin 'hexer.exe') -Force
+$env:PATH = "$CcBin;" + $env:PATH
 
 function Mirror($from, $to, [string[]]$excludeFiles = @(), [string[]]$excludeDirs = @()) {
   $a = @($from, $to, '/MIR', '/NFL', '/NDL', '/NJH', '/NJS', '/NP', '/XJ')
@@ -88,46 +64,43 @@ function Mirror($from, $to, [string[]]$excludeFiles = @(), [string[]]$excludeDir
   & robocopy @a | Out-Null
   if ($LASTEXITCODE -ge 8) { throw "robocopy $from -> $to failed ($LASTEXITCODE)" }
 }
-Mirror (Join-Path $repo 'rt\lib') (Join-Path $Root 'lib')
-Mirror (Join-Path $repo 'rt\vendor') (Join-Path $Root 'vendor')
-Mirror (Join-Path $CompilerSrc 'src') (Join-Path $Root 'src') @('*.exe', '*.o', '*.obj') @('nimcache', '.git')
-$global:LASTEXITCODE = 0
 
-# nifmake: compiled from OUR source by the staged aowlmony driver. The driver
-# itself runs a nifmake, so a root without one (a first stage) is bootstrapped
-# with the inherited executor from -CompilerSrc, which the aowlmony one replaces
-# right away. The new binary goes in under a temporary name and is renamed into
-# place: other builds may be running the old one.
-if ($Tools -contains 'nifmake') {
-  $nm = Join-Path $bin 'nifmake.exe'
-  if (-not (Test-Path $nm)) {
-    Write-Output "bootstrapping nifmake"
-    Push-Location $CompilerSrc
-    try {
-      & nim c --hints:off --warnings:off "--nimcache:$cache\nifmake-boot" "-o:$nm" 'src\nifmake\nifmake.nim'
-      if ($LASTEXITCODE -ne 0) { throw "bootstrap nifmake failed ($LASTEXITCODE)" }
-    } finally { Pop-Location }
-  }
-  Write-Output "building nifmake (aowlmony)"
-  $nmCache = Join-Path $cache 'nifmake-aowl'
-  if (Test-Path $nmCache) { Remove-Item -Recurse -Force $nmCache }   # a reused cache hands back a stale exe
-  & (Join-Path $bin 'aowlmony.exe') c -d:virtualParRi "-p:$(Join-Path $Root 'src')" "--nimcache:$nmCache" "-o:$nm.new" (Join-Path $repo 'src\nifmake\nifmake.aowl')
-  if ($LASTEXITCODE -ne 0) { throw "aowlmony build of nifmake failed ($LASTEXITCODE)" }
-  $prev = 'nifmake.prev.exe'
-  try { if (Test-Path (Join-Path $bin $prev)) { Remove-Item -Force (Join-Path $bin $prev) } }
-  catch { $prev = 'nifmake.prev-' + (Get-Date -Format 'yyyyMMddHHmmss') + '.exe' }   # still running
-  Rename-Item $nm $prev
-  Rename-Item "$nm.new" 'nifmake.exe'
-  $global:LASTEXITCODE = 0
+if (-not $inPlace) {
+  foreach ($t in $seedTools) { Copy-Item (Join-Path $Seed "bin\$t.exe") (Join-Path $bin "$t.exe") -Force }
+  if (Test-Path (Join-Path $Seed 'bin\nifmake.exe')) { Copy-Item (Join-Path $Seed 'bin\nifmake.exe') (Join-Path $bin 'nifmake.exe') -Force }
+  Mirror (Join-Path $Seed 'src') (Join-Path $Root 'src') @('*.exe', '*.o', '*.obj') @('nimcache', '.git')
 }
 
-$rev = (& git -C $CompilerSrc rev-parse --short HEAD)
-$dirty = if (& git -C $CompilerSrc status --porcelain --untracked-files=no -- src) { '+dirty' } else { '' }
+Copy-Item $Hexer (Join-Path $bin 'hexer.exe') -Force
+Mirror (Join-Path $repo 'rt\lib') (Join-Path $Root 'lib')
+Mirror (Join-Path $repo 'rt\vendor') (Join-Path $Root 'vendor')
+$global:LASTEXITCODE = 0
+
+# nifmake: compiled from OUR source by the staged aowlmony driver. The new
+# binary goes in under a temporary name and is renamed into place: other
+# builds may be running the old one.
+$nm = Join-Path $bin 'nifmake.exe'
+if (-not (Test-Path $nm)) { throw "no bin\nifmake.exe in the seed to start the first build with" }
+Write-Output "building nifmake (aowlmony)"
+$nmCache = Join-Path $cache 'nifmake-aowl'
+if (Test-Path $nmCache) { Remove-Item -Recurse -Force $nmCache }   # a reused cache hands back a stale exe
+& (Join-Path $bin 'aowlmony.exe') c -d:virtualParRi "-p:$(Join-Path $Root 'src')" "--nimcache:$nmCache" "-o:$nm.new" (Join-Path $repo 'src\nifmake\nifmake.aowl')
+if ($LASTEXITCODE -ne 0) { throw "aowlmony build of nifmake failed ($LASTEXITCODE)" }
+$prev = 'nifmake.prev.exe'
+try { if (Test-Path (Join-Path $bin $prev)) { Remove-Item -Force (Join-Path $bin $prev) } }
+catch { $prev = 'nifmake.prev-' + (Get-Date -Format 'yyyyMMddHHmmss') + '.exe' }   # still running
+Rename-Item $nm $prev
+Rename-Item "$nm.new" 'nifmake.exe'
+$global:LASTEXITCODE = 0
+
+$hexerRev = (& git -C (Split-Path (Split-Path $Hexer -Parent) -Parent) rev-parse --short HEAD)
+$repoRev = (& git -C $repo rev-parse --short HEAD)
 @(
-  "compiler source: $CompilerSrc @ $rev$dirty"
-  "lowering: $Hexer"
-  "build executor: $(Join-Path $repo 'src\nifmake\nifmake.aowl') @ $(& git -C $repo rev-parse --short HEAD) (built by the staged aowlmony)"
+  "seed: $Seed (per-module tools and compiler-internal src)"
+  "lowering: $Hexer (aowlhexer repo @ $hexerRev)"
   "lowering sha256: " + (Get-FileHash $Hexer -Algorithm SHA256).Hash.ToLower()
+  "library: $(Join-Path $repo 'rt') @ $repoRev"
+  "build executor: $(Join-Path $repo 'src\nifmake\nifmake.aowl') @ $repoRev (built by the staged aowlmony)"
   "staged: " + (Get-Date -Format o)
 ) | Set-Content -Encoding utf8 (Join-Path $Root 'STAGED.txt')
 Write-Output "aowlmony root at $Root"

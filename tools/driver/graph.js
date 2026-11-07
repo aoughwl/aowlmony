@@ -91,7 +91,7 @@ function readDeps(depsFile, defines) {
   function visit(n, active) {
     if (!Array.isArray(n)) return;
     const h = n[0];
-    if (h === "import" || h === "fromimport" || h === "include") {
+    if (h === "import" || h === "importexcept" || h === "fromimport" || h === "include") {
       // optional leading (when c1 c2 ...) means "all conditions must hold"
       let k = 1, on = active;
       if (Array.isArray(n[k]) && n[k][0] === "when") {
@@ -103,7 +103,7 @@ function readDeps(depsFile, defines) {
       const target = h === "include" ? includes : imports;
       for (const p of n.slice(k)) {
         target.push(...expandPaths(p));
-        if (h === "fromimport") break;                       // first item is the module; the rest are symbol names
+        if (h === "fromimport" || h === "importexcept") break;                       // first item is the module; the rest are symbol names
       }
     } else if (h === "stmts") for (const c of n.slice(1)) visit(c, active);
   }

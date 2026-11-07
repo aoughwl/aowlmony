@@ -12,7 +12,7 @@ function strip(n) {
   if (Array.isArray(n)) return n.map(strip);
   return n;
 }
-const WANT = new Set(["import", "fromimport", "include", "export"]);
+const WANT = new Set(["import", "importexcept", "fromimport", "include", "export"]);
 
 function extract(pNifText) {
   const tree = parseNif(pNifText);

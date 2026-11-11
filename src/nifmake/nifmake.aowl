@@ -20,11 +20,15 @@
 ##    value; it used to eat `-j`, so such builds silently ran sequentially.
 ##  * MonoTime differences are taken from `ticks` (this stdlib has no
 ##    `MonoTime - MonoTime`).
+##  * CreateProcess's 32,767 is not enough either: a program of 330 modules with
+##    a long --nimcache names more than that on its dce-live line, so a long input
+##    list of that step goes to a response file, which `hexer dl` takes as `@file`.
+##  * A step that cannot be started says why instead of failing silently.
 ##
 ## Compile:  aowlmony c -d:virtualParRi -p:<root>\src --nimcache:<dir>
 ##             -o:<root>\bin\nifmake.exe src\nifmake\nifmake.aowl
 
-import std/[assertions, os, strutils, sequtils, tables, hashes, times, monotimes, sets, parseopt, syncio, osproc, algorithm, terminal, cmdline, cpuinfo]
+import std/[assertions, os, oserrors, strutils, sequtils, tables, hashes, times, monotimes, sets, parseopt, syncio, osproc, algorithm, terminal, cmdline, cpuinfo]
 import lib / [bitabs, lineinfos, nifreader, tooldirs, argsfinder, vfs, nifcursors, nifstreams]
 
 when defined(windows):
@@ -118,6 +122,32 @@ proc addFilename(result: var string; filename, prefix, suffix: string) =
     # and so also subject to quoting:
     result.add (suffix & filename).quoteShell
 
+const
+  MaxInlineInputs = 16_000
+    ## Characters of input paths a step that takes a response file names inline.
+  CommandLineLimit = 32_767
+    ## What CreateProcess takes, its terminating NUL included.
+
+proc spillInputs(cmd: Command; inputs, outputs: seq[string]; a, b: int): string =
+  ## The response file of a step with more inputs than a command line holds, or ""
+  ## if it fits or the tool has no such thing. One path per line, unquoted.
+  result = ""
+  if cmd.name != "dceLive" or outputs.len == 0: return
+  var total = 0
+  for i in a..b:
+    if i >= 0 and i < inputs.len: total += inputs[i].len + 3
+  if total <= MaxInlineInputs: return
+  var content = ""
+  for i in a..b:
+    if i >= 0 and i < inputs.len:
+      content.add inputs[i]
+      content.add '\n'
+  result = outputs[0] & ".rsp"
+  try:
+    writeFile(result, content)
+  except:
+    quit "nifmake: cannot write response file: " & result
+
 proc expandCommand(cmd: Command; inputs, outputs, args: seq[string]; baseDir: string): string =
   result = ""
   if cmd.tokens.len == 0:
@@ -181,9 +211,13 @@ proc expandCommand(cmd: Command; inputs, outputs, args: seq[string]; baseDir: st
           while n.hasMore: skip n
         case tag
         of "input":
-          for i in a..b:
-            if i >= 0 and i < inputs.len:
-              addFilename(result, inputs[i], prefix, suffix)
+          let rsp = spillInputs(cmd, inputs, outputs, a, b)
+          if rsp.len > 0:
+            addFilename(result, rsp, prefix, "@")
+          else:
+            for i in a..b:
+              if i >= 0 and i < inputs.len:
+                addFilename(result, inputs[i], prefix, suffix)
         of "output":
           for i in a..b:
             if i >= 0 and i < outputs.len:
@@ -321,6 +355,16 @@ proc topologicalSort(dag: var Dag): seq[int] =
       dec j
     result[j + 1] = x
 
+proc reportStartFailure(command: string) =
+  ## Says why a build step did not start. Taken right after the failure, for the
+  ## OS's last error.
+  var msg = "nifmake: could not start a step of " & $command.len & " characters"
+  when defined(windows):
+    if command.len >= CommandLineLimit:
+      msg.add " (the command line limit is " & $(CommandLineLimit - 1) & ")"
+  msg.add ": error code " & $int32(osLastError())
+  stderr.writeLine msg
+
 proc executeCommand(command: string): bool =
   ## Run one build step and return success status. Started directly
   ## (CreateProcess on Windows), not through the shell: see the module doc.
@@ -330,6 +374,7 @@ proc executeCommand(command: string): bool =
     close(p)
     result = exitCode == 0
   except:
+    reportStartFailure command
     result = false
 
 proc joinWith(a: seq[string]; sep: string): string =
@@ -489,6 +534,7 @@ proc runDag(dag: var Dag; opt: set[CliOption]; profile: var ProfileData; doProfi
               active.add p
               activeIdx.add nextIdx
             except:
+              reportStartFailure commands[nextIdx]
               failedIdx.add nextIdx
             inc nextIdx
           if failedIdx.len > 0 and active.len == 0:

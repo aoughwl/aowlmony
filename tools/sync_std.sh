@@ -1,10 +1,10 @@
 #!/bin/sh
 # sync_std.sh - keep rt/lib/std (the vendored standard library) in step with the
-# source of truth, github.com/aoughwl/std, directory core/std.
+# source of truth, github.com/aoughwl/std (one folder per module; tools/flatten_core.sh there rebuilds the std/ tree).
 #
 #   tools/sync_std.sh [--check] [<std-checkout>]
 #
-# default: copy <std>/core/std/ over rt/lib/std/ (files only in rt/lib/std are
+# default: flatten <std> and copy the result over rt/lib/std/ (files only in rt/lib/std are
 #          removed so the result equals the source tree).
 # --check: change nothing; list files that differ (CR/LF differences ignored)
 #          and exit 1 if there are any, 0 if the trees match.
@@ -22,13 +22,14 @@ for a in "$@"; do
   esac
 done
 [ -n "$STD" ] || STD=${AOWL_STD:-$HERE/../std}
-SRC=$STD/core/std
 DST=$HERE/rt/lib/std
-[ -d "$SRC" ] || { echo "sync_std: $SRC not found (set AOWL_STD or pass the std checkout)" >&2; exit 2; }
+[ -f "$STD/tools/flatten_core.sh" ] || { echo "sync_std: $STD/tools/flatten_core.sh not found (set AOWL_STD or pass the std checkout)" >&2; exit 2; }
 [ -d "$DST" ] || { echo "sync_std: $DST not found" >&2; exit 2; }
 
 TMP=$(mktemp -d) || exit 2
 trap 'rm -rf "$TMP"' EXIT
+sh "$STD/tools/flatten_core.sh" "$TMP/flat" >&2 || { echo "sync_std: flatten failed" >&2; exit 2; }
+SRC=$TMP/flat/std
 (cd "$SRC" && find . -type f | sort) >"$TMP/a"
 (cd "$DST" && find . -type f | sort) >"$TMP/b"
 

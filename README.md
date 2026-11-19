@@ -274,10 +274,10 @@ replacing nimony's build-a-native-exe-per-macro model. Wiring this into
 
 ## Standard library: `rt/lib/std` is a generated copy
 
-The source of truth for the standard library is the `core/std` directory of
+The source of truth for the standard library is the per-module folders (`os/`, `strutils/`, ... listed in `core-layout.txt`) of
 [aoughwl/std](https://github.com/aoughwl/std). `rt/lib/std` in this repo is a
 copy of it, kept only so the toolchain stays self-contained for bootstrap (no
-sibling checkout is needed to build). Do not edit it by hand: change `core/std`
+sibling checkout is needed to build). Do not edit it by hand: change the module folders
 in aoughwl/std, then run `tools/sync_std.sh [<std-checkout>]` here (default
 checkout: `$AOWL_STD`, else `../std`). `tools/sync_std.sh --check` changes
 nothing, lists differing files (CR/LF differences ignored) and exits 1 if there

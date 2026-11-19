@@ -272,6 +272,17 @@ that runs `aowlmony interp` is meant to run `static:` blocks and constant foldin
 replacing nimony's build-a-native-exe-per-macro model. Wiring this into
 [aowlsem](https://github.com/aoughwl/aowlsem) is the next milestone.
 
+## Standard library: `rt/lib/std` is a generated copy
+
+The source of truth for the standard library is the `core/std` directory of
+[aoughwl/std](https://github.com/aoughwl/std). `rt/lib/std` in this repo is a
+copy of it, kept only so the toolchain stays self-contained for bootstrap (no
+sibling checkout is needed to build). Do not edit it by hand: change `core/std`
+in aoughwl/std, then run `tools/sync_std.sh [<std-checkout>]` here (default
+checkout: `$AOWL_STD`, else `../std`). `tools/sync_std.sh --check` changes
+nothing, lists differing files (CR/LF differences ignored) and exits 1 if there
+are any.
+
 ## Test
 
 ```sh

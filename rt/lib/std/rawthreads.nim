@@ -67,6 +67,10 @@ else:
   when not defined(haiku):
     {.passC: "-pthread".}
 
+  when defined(linux):
+    # CPU_ZERO / CPU_SET / pthread_setaffinity_np are GNU extensions: glibc hides them unless _GNU_SOURCE is defined before the first include.
+    {.passC: "-D_GNU_SOURCE".}
+
   when not declared(Time):
     when defined(linux):
       type Time = clong

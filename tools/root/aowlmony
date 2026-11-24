@@ -1,0 +1,66 @@
+#!/bin/sh
+# aowlmony -- build and run aowl programs with the aowl toolchain ONLY:
+#   aowlparser -> aowlsem -> aowlhexer -> aowlc -> gcc
+# No nimony / nim binaries, libraries or sources are used. Everything it needs is
+# under this root:  bin/ (the four tools)  lib/std (aoughwl/std)  vendor/ (mimalloc)
+# src/ (compiler-internal library sources the tools themselves are built from)
+# driver/ (the build-graph driver, node).
+#
+#   aowlmony run   FILE [-- ARGS...]    build, then run
+#   aowlmony build FILE [-o OUT]        build a native executable
+#   aowlmony check FILE                 parse + semantic check + lowering, no link
+#   options: -d:NAME (repeatable)  --path:DIR (repeatable)  -v  --keep
+set -eu
+ROOT="${AOWL_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"
+cmd="${1:-help}"; [ $# -gt 0 ] && shift
+file=""; out=""; defs=""; paths=""; verbose=""; runargs=""; keep=0; usernc=""; navreq=0
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -o) out="$2"; shift 2 ;;
+    -d:*) defs="${defs:+$defs,}${1#-d:}"; shift ;;
+    --path:*) paths="${paths:+$paths,}${1#--path:}"; shift ;;
+    -p:*) paths="${paths:+$paths,}${1#-p:}"; shift ;;
+    --nimcache:*) usernc="${1#--nimcache:}"; shift ;;
+    --def:*|--usages:*) navreq=1; shift ;;     # idetools queries: not provided by aowlsem yet
+    --format:*|--cwd:*) shift ;;
+    -v) verbose="-v"; shift ;;
+    --keep) keep=1; shift ;;
+    --) shift; runargs="$*"; break ;;
+    -*) echo "aowlmony: unknown option $1" >&2; exit 2 ;;
+    *) if [ -z "$file" ]; then file="$1"; else runargs="$runargs $1"; fi; shift ;;
+  esac
+done
+case "$cmd" in
+  run|build|check) : ;;
+  *) sed -n '2,13p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+esac
+[ -n "$file" ] || { echo "aowlmony $cmd: no input file" >&2; exit 2; }
+[ -f "$file" ] || { echo "aowlmony: no such file: $file" >&2; exit 2; }
+command -v node >/dev/null 2>&1 || { echo "aowlmony: needs node for the build driver" >&2; exit 1; }
+abs=$(cd "$(dirname "$file")" && pwd)/$(basename "$file")
+dir=$(dirname "$abs")
+base=$(basename "$abs"); stem=${base%.*}
+nc="${usernc:-${AOWL_CACHE:-${XDG_CACHE_HOME:-$HOME/.cache}/aowlmony}/$(printf '%s' "$abs" | cksum | cut -d' ' -f1)}"
+mkdir -p "$nc"
+export AOWL_PARSER="$ROOT/bin/aowlparser" AOWL_SEM="$ROOT/bin/aowlsem" \
+       AOWL_HEXER="$ROOT/bin/aowlhexer" AOWL_C="$ROOT/bin/aowlc"
+[ "$cmd" = check ] && stop="--no-link" || stop=""
+log=$(mktemp)
+if ! node "$ROOT/driver/driver.js" "$abs" --cwd "$dir" --lib "$ROOT/lib" --nc "$nc" \
+      ${paths:+--path "$paths"} ${defs:+--define "$defs"} $verbose >"$log" 2>&1; then
+  if [ "$cmd" = check ]; then
+    # diagnostics keep their `--> file:line:col` locations: the LSP maps them to ranges
+    sed -n '/^error/,$p' "$log" >&2
+  else
+    grep -vE 'warning\[|^ *\|$|^ *= |^ *[0-9]+ \||widestrs|-->' "$log" | sed -n '1,60p' >&2
+  fi
+  rm -f "$log"; echo "  x compile failed" >&2; exit 1
+fi
+exe=$(sed -n 's/^built //p' "$log" | tail -1); rm -f "$log"
+[ -x "$exe" ] || { echo "aowlmony: no executable produced" >&2; exit 1; }
+case "$cmd" in
+  check) [ "$navreq" = 1 ] || echo "  ok  $base" ;;
+  build) cp "$exe" "${out:-$dir/$stem}"; echo "  built ${out:-$dir/$stem}" ;;
+  run)   # shellcheck disable=SC2086
+         exec "$exe" $runargs ;;
+esac

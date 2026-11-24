@@ -16,12 +16,13 @@ const main = path.resolve(process.argv[2] || "");
 const cwd = path.resolve(arg("cwd", process.cwd()));
 const lib = path.resolve(arg("lib", ""));
 const nc = path.resolve(arg("nc", ""));
-const exeName = arg("exe", path.basename(main).replace(/\.(aowl|nim)$/, "") + ".exe");
+const exeName = arg("exe", path.basename(main).replace(/\.(aowl|nim)$/, "") + (process.platform === "win32" ? ".exe" : ""));
 const winPath = p => /^\/[a-zA-Z]\//.test(p) ? p[1].toUpperCase() + ":" + p.slice(2) : p;   // MSYS-style /c/x -> C:/x
 const extraPaths = (arg("path", "") || "").split(",").filter(Boolean).map(p => path.resolve(winPath(p)));   // more import roots
 const userDefines = ["aowlmony", ...(arg("define", "") || "").split(",").filter(Boolean)];   // -d: symbols for every module
 // `nimony` stays defined: aowlsem seeds it (library sources gate imports on it), and the graph must agree with the checker or a guarded import is never built.
-const defines = new Set(["windows", "nimony", ...userDefines]);
+const IS_WIN = process.platform === "win32";
+const defines = new Set([IS_WIN ? "windows" : "linux", "nimony", ...userDefines]);
 const T = path.resolve(arg("tools-dir", path.join(__dirname, "..", "..", "..")));
 const tools = {
   parser: process.env.AOWL_PARSER || path.join(T, "aifparser", "bin", "aowlparser.exe"),
@@ -55,7 +56,7 @@ function ensure(file, name) {
 }
 
 (async () => {
-  fs.writeFileSync(path.join(nc, "cachedconfigfile.txt"), `--base:${cwd} -d:aowlmony --bits:64 --cpu:amd64 --os:Windows ${main}\n`);
+  fs.writeFileSync(path.join(nc, "cachedconfigfile.txt"), `--base:${cwd} -d:aowlmony --bits:64 --cpu:amd64 --os:${process.platform === "win32" ? "Windows" : "Linux"} ${main}\n`);
   // ---- phase 1: parse + sem
   const p1 = generate({ main, cwd, lib, nc, defines, ensure, paths: extraPaths });
   const nodes1 = p1.nodes.filter(n => n.tool === "nimsem").map(n => {
@@ -97,7 +98,7 @@ function ensure(file, name) {
       case "dceEmit": argv = [tools.hexer, "de", ...H, ...n.args, n.inputs[0], n.inputs[1]]; break;
       case "lengc": argv = [tools.c, n.inputs[0]]; n = { ...n, stdoutTo: n.outputs[0] }; break;
       case "cc": argv = [tools.cc, "-c", "-Wno-attributes", "-Wno-error=incompatible-pointer-types", "-Wno-error=int-conversion", "-O1", "-I" + path.dirname(main), ...extraPaths.map(p => "-I" + p), ...(process.env.AOWL_CFLAGS ? process.env.AOWL_CFLAGS.split(" ").filter(Boolean) : []), ...p2.passC, ...n.args, n.inputs[0], "-o", n.outputs[0]]; break;
-      case "link": argv = [tools.cc, ...(process.argv.includes("--shared") ? ["-shared"] : []), "-o", n.outputs[0], ...n.inputs.filter(i => i.endsWith(".o")), ...p2.passL, "-lws2_32"]; break;
+      case "link": argv = [tools.cc, ...(process.argv.includes("--shared") ? ["-shared"] : []), "-o", n.outputs[0], ...n.inputs.filter(i => i.endsWith(".o")), ...p2.passL, ...(IS_WIN ? ["-lws2_32"] : ["-lpthread", "-lm", "-ldl"])]; break;
       default: throw new Error("no command for tool " + n.tool);
     }
     return { ...n, argv, cwd };

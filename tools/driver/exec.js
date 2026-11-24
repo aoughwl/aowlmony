@@ -28,11 +28,17 @@ async function runGraph(nodes, opts = {}) {
     const pump = () => {
       if (failed) { if (running === 0) resolve({ ok: false, failed }); return; }
       if (finished === nodes.length) { resolve({ ok: true }); return; }
+      let skippedThisPass;
+      do {
+      skippedThisPass = false;
       for (let i = 0; i < nodes.length && running < jobs; i++) {
         if (state[i] !== "pending") continue;
         if ([...deps[i]].some(d => state[d] !== "done" && state[d] !== "skipped")) continue;
         const n = nodes[i];
-        if (!stale(n)) { state[i] = "skipped"; finished++; log(`skip   ${n.tool}`); continue; }
+        // a skip can unblock a node EARLIER in the list (its input is produced by a
+        // later one): remember it and sweep again, or a fully up-to-date rebuild
+        // reports a bogus "deadlock: unsatisfied dependencies".
+        if (!stale(n)) { state[i] = "skipped"; finished++; skippedThisPass = true; log(`skip   ${n.tool}`); continue; }
         state[i] = "running"; running++;
         log(`run    ${n.tool} ${n.outputs[0] || ""}`);
         const [exe, ...args] = n.argv;
@@ -52,6 +58,8 @@ async function runGraph(nodes, opts = {}) {
           pump();
         };
       }
+      } while (skippedThisPass && finished < nodes.length && !failed);
+      if (finished === nodes.length && running === 0 && !failed) { resolve({ ok: true }); return; }
       if (running === 0 && !failed && finished < nodes.length) {
         // nothing runnable but work remains: a cycle or an input nobody produces yet
         failed = { node: null, code: -1, output: "deadlock: unsatisfied dependencies", missing: [] };

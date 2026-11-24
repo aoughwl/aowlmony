@@ -890,7 +890,11 @@ function compile(nimFile, o, t) {
     .update([abs, t.parserVariant, t.hexerVariant, t.semVariant,
              toolStamp(ran(useOurParser, t.nifparser)), toolStamp(ran(useAifhexer, t.aifhexer)),
              toolStamp(ran(semUse(), t.aowlsem)), ...pathFlags, ...defineFlags,
-             ...(usePure ? ["pure", ...["aowlparser", "aowlsem", "aowlhexer", "aowlc"].map((n) => toolStamp(path.join(pureRoot, "bin", n))), toolStamp(pureDriver)] : [])].join("\0"))
+             ...(usePure ? ["pure", ...["aowlparser", "aowlsem", "aowlhexer", "aowlc"].map((n) => toolStamp(path.join(pureRoot, "bin", n))), toolStamp(pureDriver),
+               "cflags=" + (process.env.AOWL_CFLAGS || ""),
+               toolStamp(path.join(pureRoot, "lib", "std", "system.nim")),
+               toolStamp(path.join(pureRoot, "lib", "std", "private", "syslocks.nim")),
+               toolStamp(path.join(pureRoot, "lib", "std", "rawthreads.nim"))] : [])].join("\0"))
     .digest("hex").slice(0, 12);
   const stage = o.out && o.keep ? path.join(path.dirname(abs), ".aowlmony")
     : path.join(os.tmpdir(), "aowlmony-cache", key);
@@ -1045,7 +1049,7 @@ function compile(nimFile, o, t) {
       }
     } catch (_) { /* read-only fs, file locked, etc. - not worth failing the build over */ }
   }
-  return { stage, nc, mainHash, snif, cnif, pnif, byOurParser, compileMs, nbin };
+  return { stage, nc, mainHash, snif, cnif, pnif, byOurParser, compileMs, nbin, usePure };
 }
 
 function runTool(bin, args, opts = {}) {
@@ -1984,7 +1988,9 @@ function main() {
       // driver, even though `verify` could already drive both backends and the
       // nimony one was sitting finished in the nimcache. Costs nothing — that
       // compile is already paid for.
-      const which = o.native || "aowlc";
+      // PURE backend: the default realizer is the binary the build-graph driver already
+      // produced (aowlc-native -> gcc, per module); no JS aowlc, no V8 string limit.
+      const which = o.native || (b.usePure && b.nbin ? "nimony" : "aowlc");
       if (which !== "nimony" && which !== "aowlc") fail("--native takes nimony|aowlc, not '" + which + "'");
       if (which === "nimony") {
         if (!b.nbin) {
@@ -1999,7 +2005,7 @@ function main() {
         const dest = o.out || path.join(process.cwd(),
           path.basename(absSrc, path.extname(absSrc)) + (process.platform === "win32" ? ".exe" : ""));
         const { ms } = timeRun(() => { fs.copyFileSync(b.nbin, dest); return {}; });
-        console.error("  " + C.gray("nimony: built ") + C.cyan(dest));
+        console.error("  " + C.gray((b.usePure ? "pure: built " : "nimony: built ")) + C.cyan(dest));
         timingLine(cmd, b.compileMs, ms, o);
         process.exit(0);
       }
@@ -2011,7 +2017,13 @@ function main() {
       process.exit(st);
     }
     case "run": {
-      const { r, ms } = timeRun(() => runTool("node", [t.nifc, "run", b.cnif]));
+      // PURE: the build-graph driver already compiled AND linked the program, so run
+      // that binary. The JS aowlc below materialises the whole C text as one string and
+      // dies with `Invalid string length` on big programs (the JS engine). An explicit
+      // --native:aowlc still goes through it.
+      const usePureBin = b.usePure && b.nbin && o.native !== "aowlc";
+      const { r, ms } = timeRun(() => usePureBin ? runTool(b.nbin, [])
+        : runTool("node", [t.nifc, "run", b.cnif]));
       const st = r.status == null ? 0 : r.status;
       if (st === 0) timingLine(cmd, b.compileMs, ms, o);
       process.exit(st);

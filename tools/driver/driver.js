@@ -97,7 +97,7 @@ function ensure(file, name) {
       case "dceLive": argv = [tools.hexer, "dl", ...H, ...n.inputs, n.outputs[0]]; break;
       case "dceEmit": argv = [tools.hexer, "de", ...H, ...n.args, n.inputs[0], n.inputs[1]]; break;
       case "lengc": argv = [tools.c, n.inputs[0]]; n = { ...n, stdoutTo: n.outputs[0] }; break;
-      case "cc": argv = [tools.cc, "-c", "-Wno-attributes", "-Wno-error=incompatible-pointer-types", "-Wno-error=int-conversion", "-O1", "-I" + path.dirname(main), ...extraPaths.map(p => "-I" + p), ...(process.env.AOWL_CFLAGS ? process.env.AOWL_CFLAGS.split(" ").filter(Boolean) : []), ...p2.passC, ...n.args, n.inputs[0], "-o", n.outputs[0]]; break;
+      case "cc": argv = [tools.cc, "-c", "-Wno-attributes", "-Wno-error=incompatible-pointer-types", "-Wno-error=int-conversion", "-O1", ...(IS_WIN ? [] : ["-D_GNU_SOURCE"]), "-I" + path.dirname(main), ...extraPaths.map(p => "-I" + p), ...(process.env.AOWL_CFLAGS ? process.env.AOWL_CFLAGS.split(" ").filter(Boolean) : []), ...p2.passC, ...n.args, n.inputs[0], "-o", n.outputs[0]]; break;
       case "link": argv = [tools.cc, ...(process.argv.includes("--shared") ? ["-shared"] : []), "-o", n.outputs[0], ...n.inputs.filter(i => i.endsWith(".o")), ...p2.passL, ...(IS_WIN ? ["-lws2_32"] : ["-lpthread", "-lm", "-ldl"])]; break;
       default: throw new Error("no command for tool " + n.tool);
     }

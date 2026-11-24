@@ -20,7 +20,7 @@ mkdir -p "$ROOT"/{bin,lib,vendor,src,driver}
 cp -r "$STD" "$ROOT/lib/"
 cp -r "$HERE/rt/vendor/mimalloc" "$ROOT/vendor/"
 for d in lib models; do cp -r "$NIF/$d" "$ROOT/src/"; done
-for d in nimony njvl lengc gear2; do cp -r "$MODEL/$d" "$ROOT/src/"; done
+for d in model njvl lengc gear2; do cp -r "$MODEL/$d" "$ROOT/src/"; done
 cp "$HERE"/tools/driver/*.js "$ROOT/driver/"
 cp "$HERE/tools/root/aowlbuild" "$ROOT/bin/aowlbuild"; cp "$HERE/bin/aowlmony" "$ROOT/bin/aowlmony"; chmod +x "$ROOT/bin/aowlbuild" "$ROOT/bin/aowlmony"
 for t in aowlparser aowlsem aowlhexer; do cp "$REPOS/$t/bin/$t" "$ROOT/bin/$t"; done

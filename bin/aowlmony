@@ -828,6 +828,14 @@ function suggestFixHints(nimFile, abs, t, shownKeys) {
 function compile(nimFile, o, t) {
   if (!fs.existsSync(nimFile)) fail("no such file: " + nimFile);
   const abs = path.resolve(nimFile);
+  // PURE BACKEND: build with the aowl tools ONLY (aowlparser -> aowlsem -> aowlhexer -> aowlc
+  // -> gcc) through the root's build-graph driver, with no nimony binary involved. Used
+  // whenever the root exists and nimony is not asked for (AOWLMONY_USE_NIMONY=1) — i.e. the
+  // `nimony` binary is gone from the machine. Same cache layout (nc/<hash>/<hash>.c.nif), so
+  // everything after this call (run / interp / verify / ts / py ...) is unchanged.
+  const pureRoot = process.env.AOWL_ROOT || path.join(HOME, ".aowl", "root");
+  const pureDriver = path.join(pureRoot, "driver", "driver.js");
+  const usePure = fs.existsSync(pureDriver) && !process.env.AOWLMONY_USE_NIMONY;
   // Decide WHICH implementation performs each swappable pass before the cache key
   // is taken — the key has to describe the toolchain that actually ran, and these
   // are pure functions of the resolved tools and the environment.
@@ -881,14 +889,17 @@ function compile(nimFile, o, t) {
   const key = require("crypto").createHash("sha1")
     .update([abs, t.parserVariant, t.hexerVariant, t.semVariant,
              toolStamp(ran(useOurParser, t.nifparser)), toolStamp(ran(useAifhexer, t.aifhexer)),
-             toolStamp(ran(semUse(), t.aowlsem)), ...pathFlags, ...defineFlags].join("\0"))
+             toolStamp(ran(semUse(), t.aowlsem)), ...pathFlags, ...defineFlags,
+             ...(usePure ? ["pure", ...["aowlparser", "aowlsem", "aowlhexer", "aowlc"].map((n) => toolStamp(path.join(pureRoot, "bin", n))), toolStamp(pureDriver)] : [])].join("\0"))
     .digest("hex").slice(0, 12);
   const stage = o.out && o.keep ? path.join(path.dirname(abs), ".aowlmony")
     : path.join(os.tmpdir(), "aowlmony-cache", key);
   fs.mkdirSync(stage, { recursive: true });
-  if (useOurParser) stageRoutingShim(stage, "nifler", t);
+  if (usePure) { /* the pure driver calls the tools directly: no shims */ }
+  else if (useOurParser) stageRoutingShim(stage, "nifler", t);
   else clearShim(stage, "nifler");
-  if (useAifhexer) stageHexer(stage, t.aifhexer);
+  if (usePure) { /* no hexer shim */ }
+  else if (useAifhexer) stageHexer(stage, t.aifhexer);
   else clearShim(stage, "hexer");   // no stale shim left lingering in the cache
   o._usedAifhexer = useAifhexer;
   // Stage a `nimsem` shim → aowlsem so nimony's build (findTool("nimsem")) uses
@@ -901,12 +912,15 @@ function compile(nimFile, o, t) {
   // predicate the cache key was taken with — one definition, or the key stops
   // describing the build.
   const useAowlsem = !!semUse();
-  const libDir = path.join(path.dirname(path.dirname(t.nimony)), "lib");
-  if (useAowlsem) stageRoutingShim(stage, "nimsem", t, libDir);
+  const libDir = usePure ? path.join(pureRoot, "lib")
+    : path.join(path.dirname(path.dirname(t.nimony)), "lib");
+  if (usePure) { /* no nimsem shim: aowlsem is called directly */ }
+  else if (useAowlsem) stageRoutingShim(stage, "nimsem", t, libDir);
   else clearShim(stage, "nimsem");   // ensure a stale shim doesn't linger in the cache
   o._usedAowlsem = useAowlsem;
   // …and the staged nifmake that makes any of the three actually reachable.
-  if (useOurParser || useAowlsem || useAifhexer) stageNifmake(stage, t);
+  if (usePure) { /* our own build graph + executor: no nifmake */ }
+  else if (useOurParser || useAowlsem || useAifhexer) stageNifmake(stage, t);
   else clearShim(stage, "nifmake");
   const nc = path.join(stage, "nc");
 
@@ -960,12 +974,20 @@ function compile(nimFile, o, t) {
   const lockArgv = process.platform === "win32" ? ["bash", nimlock] : [nimlock];
   const _t0 = process.hrtime.bigint();
   const nimonyArgv = ["c", "--nimcache:" + nc, ...pathFlags, ...defineFlags, abs];
-  const r = locked
+  const spawnPure = () => cp.spawnSync(process.execPath, [pureDriver, abs,
+      "--cwd", path.dirname(abs), "--lib", path.join(pureRoot, "lib"), "--nc", nc,
+      ...((o.paths || []).length ? ["--path", o.paths.map((p) => path.resolve(p)).join(",")] : []),
+      ...((o.defines || []).length ? ["--define", o.defines.join(",")] : [])],
+    { cwd: stage, encoding: "utf8", maxBuffer: 1 << 28,
+      env: Object.assign({}, process.env, {
+        AOWL_PARSER: path.join(pureRoot, "bin", "aowlparser"), AOWL_SEM: path.join(pureRoot, "bin", "aowlsem"),
+        AOWL_HEXER: path.join(pureRoot, "bin", "aowlhexer"), AOWL_C: path.join(pureRoot, "bin", "aowlc") }) });
+  const r = usePure ? spawnPure() : locked
     ? cp.spawnSync(lockArgv[0], [...lockArgv.slice(1), t.nimony, ...nimonyArgv],
         { cwd: stage, env, encoding: "utf8" })
     : cp.spawnSync(t.nimony, nimonyArgv,
         { cwd: stage, env, encoding: "utf8" });
-  if (r.error) log(o, "nimony could not be launched: " + r.error.message);
+  if (r.error) log(o, (usePure ? "pure driver" : "nimony") + " could not be launched: " + r.error.message);
   const compileMs = Number(process.hrtime.bigint() - _t0) / 1e6;
   if (o.verbose && r.stderr) process.stderr.write(r.stderr);
 

@@ -21,7 +21,7 @@ cp -r "$STD" "$ROOT/lib/"
 cp -r "$HERE/rt/vendor/mimalloc" "$ROOT/vendor/"
 for d in lib models nimony njvl lengc gear2 hexer v2; do [ -d "$SRCLIB/$d" ] && cp -r "$SRCLIB/$d" "$ROOT/src/"; done
 cp "$HERE"/tools/driver/*.js "$ROOT/driver/"
-cp "$HERE/tools/root/aowlmony" "$ROOT/bin/aowlmony"; chmod +x "$ROOT/bin/aowlmony"
+cp "$HERE/tools/root/aowlbuild" "$ROOT/bin/aowlbuild"; cp "$HERE/bin/aowlmony" "$ROOT/bin/aowlmony"; chmod +x "$ROOT/bin/aowlbuild" "$ROOT/bin/aowlmony"
 for t in aowlparser aowlsem aowlhexer; do cp "$REPOS/$t/bin/$t" "$ROOT/bin/$t"; done
 cp "$REPOS/aowlc/bin/aowlc-native" "$ROOT/bin/aowlc"
 echo "staged $ROOT"

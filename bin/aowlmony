@@ -897,7 +897,7 @@ function compile(nimFile, o, t) {
     .update([abs, t.parserVariant, t.hexerVariant, t.semVariant,
              toolStamp(ran(useOurParser, t.nifparser)), toolStamp(ran(useAifhexer, t.aifhexer)),
              toolStamp(ran(semUse(), t.aowlsem)), ...pathFlags, ...defineFlags,
-             ...(usePure ? ["pure", ...["aowlparser", "aowlsem", "aowlhexer", "aowlc"].map((n) => toolStamp(path.join(pureRoot, "bin", n))), toolStamp(pureDriver),
+             ...(usePure ? ["pure", ...["aowlparser", "aowlsem", "aowlhexer", "aowlc"].map((n) => toolStamp(process.env["AOWL_" + ({aowlparser:"PARSER",aowlsem:"SEM",aowlhexer:"HEXER",aowlc:"C"})[n]] || path.join(pureRoot, "bin", n))), toolStamp(pureDriver),
                "cflags=" + (process.env.AOWL_CFLAGS || ""), ...(process.env.AOWL_LDFLAGS ? ["ldflags=" + process.env.AOWL_LDFLAGS] : []),
                toolStamp(path.join(pureRoot, "lib", "std", "system.nim")),
                toolStamp(path.join(pureRoot, "lib", "std", "private", "syslocks.nim")),
@@ -992,8 +992,9 @@ function compile(nimFile, o, t) {
       ...((o.defines || []).length ? ["--define", o.defines.join(",")] : [])],
     { cwd: stage, encoding: "utf8", maxBuffer: 1 << 28,
       env: Object.assign({}, process.env, {
-        AOWL_PARSER: path.join(pureRoot, "bin", "aowlparser"), AOWL_SEM: path.join(pureRoot, "bin", "aowlsem"),
-        AOWL_HEXER: path.join(pureRoot, "bin", "aowlhexer"), AOWL_C: path.join(pureRoot, "bin", "aowlc") }) });
+        // an AOWL_* tool already in the environment wins (try a candidate tool without a scratch root)
+        AOWL_PARSER: process.env.AOWL_PARSER || path.join(pureRoot, "bin", "aowlparser"), AOWL_SEM: process.env.AOWL_SEM || path.join(pureRoot, "bin", "aowlsem"),
+        AOWL_HEXER: process.env.AOWL_HEXER || path.join(pureRoot, "bin", "aowlhexer"), AOWL_C: process.env.AOWL_C || path.join(pureRoot, "bin", "aowlc") }) });
   const r = usePure ? spawnPure() : locked
     ? cp.spawnSync(lockArgv[0], [...lockArgv.slice(1), t.nimony, ...nimonyArgv],
         { cwd: stage, env, encoding: "utf8" })

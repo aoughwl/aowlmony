@@ -29,6 +29,9 @@ grep -v '^#' "$AOWL_STD/core-layout.txt" | while read kind name; do
     done)
   else for f in "$AOWL_STD/$name"/*; do [ -f "$f" ] && ln -s "$f" "$ROOT/lib/std/$(basename "$f")"; done; fi
 done
+if find -L "$ROOT/lib/std" -type f \( -name '*.nim' -o -name '*.aowl' -o -name '*.c' -o -name '*.h' \) -print0 | xargs -0 grep -lq $'\r' 2>/dev/null; then
+  echo "stage: CRLF files in $AOWL_STD (checkout is CRLF-dirty). Run: git -C $AOWL_STD checkout -- .   (the dirt is CR-only)" >&2; exit 2; fi
+
 MIM="$HERE/rt/vendor/mimalloc"; [ -d "$MIM" ] || MIM="${MIMALLOC:-$HOME/.aowl/root/vendor/mimalloc}"
 [ -d "$ROOT/vendor/mimalloc" ] && [ "$MIM" = "$ROOT/vendor/mimalloc" ] || cp -r "$MIM" "$ROOT/vendor/"
 for d in lib models; do cp -r "$NIF/$d" "$ROOT/src/"; done

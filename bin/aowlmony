@@ -334,6 +334,13 @@ function parseArgs(argv) {
     const a = argv[i];
     if (a === "--") { o.progArgs = argv.slice(i + 1); break; }
     else if (a === "-o" || a === "--out") o.out = argv[++i];
+    // nimony-compatible spellings (the old `aowlmony c FILE -p:.. --passC:".." --passL:".." --nimcache:D -o:OUT`)
+    else if (/^(-o|--out):/.test(a)) o.out = a.slice(a.indexOf(":") + 1);
+    else if (/^--passC:/.test(a)) (o.passC = o.passC || []).push(a.slice(8));
+    else if (/^--passL:/.test(a)) (o.passL = o.passL || []).push(a.slice(8));
+    else if (/^--nimcache:/.test(a)) o.nimcache = a.slice(11);
+    else if (/^--cc:/.test(a)) o.cc = a.slice(5);   // only gcc/cc are driven; accepted for script compatibility
+    else if (/^--(opt|app|threads|mm|define|hints|warnings|verbosity):/.test(a) && !/^--define:/.test(a)) { /* accepted, no effect */ }
     else if (a === "--entry") o.entry = argv[++i];
     else if (a === "-e") o.eval = argv[++i];
     else if (a === "--arg") o.args.push(argv[++i]);
@@ -891,7 +898,7 @@ function compile(nimFile, o, t) {
              toolStamp(ran(useOurParser, t.nifparser)), toolStamp(ran(useAifhexer, t.aifhexer)),
              toolStamp(ran(semUse(), t.aowlsem)), ...pathFlags, ...defineFlags,
              ...(usePure ? ["pure", ...["aowlparser", "aowlsem", "aowlhexer", "aowlc"].map((n) => toolStamp(path.join(pureRoot, "bin", n))), toolStamp(pureDriver),
-               "cflags=" + (process.env.AOWL_CFLAGS || ""),
+               "cflags=" + (process.env.AOWL_CFLAGS || ""), ...(process.env.AOWL_LDFLAGS ? ["ldflags=" + process.env.AOWL_LDFLAGS] : []),
                toolStamp(path.join(pureRoot, "lib", "std", "system.nim")),
                toolStamp(path.join(pureRoot, "lib", "std", "private", "syslocks.nim")),
                toolStamp(path.join(pureRoot, "lib", "std", "rawthreads.nim"))] : [])].join("\0"))
@@ -926,7 +933,8 @@ function compile(nimFile, o, t) {
   if (usePure) { /* our own build graph + executor: no nifmake */ }
   else if (useOurParser || useAowlsem || useAifhexer) stageNifmake(stage, t);
   else clearShim(stage, "nifmake");
-  const nc = path.join(stage, "nc");
+  const nc = o.nimcache ? path.resolve(o.nimcache) : path.join(stage, "nc");
+  if (o.nimcache) fs.mkdirSync(nc, { recursive: true });
 
   // Content-freshness guard. nifmake's needsRebuild is mtime-only: it rebuilds a
   // node only when a source's mtime is strictly newer than the cached output. A
@@ -1855,8 +1863,11 @@ function main() {
   // `+profile` (rustup-style) = compile with an ephemeral toolchain profile for
   // this one invocation; flows to `aowl config` via AOWL_PROFILE (see loadStack).
   if (argv[0] && argv[0][0] === "+") process.env.AOWL_PROFILE = argv.shift().slice(1);
+  if (argv[0] === "c" || argv[0] === "compile") argv[0] = "build";   // nimony-style `c` = build
   const cmd = argv[0];
   const o = parseArgs(argv.slice(1));
+  if (o.passC && o.passC.length) process.env.AOWL_CFLAGS = [process.env.AOWL_CFLAGS || "", ...o.passC].join(" ").trim();
+  if (o.passL && o.passL.length) process.env.AOWL_LDFLAGS = [process.env.AOWL_LDFLAGS || "", ...o.passL].join(" ").trim();
   const t = resolveTools();
 
   if (!cmd || cmd === "-h" || cmd === "--help" || cmd === "help") {

@@ -6,8 +6,7 @@
 # Inputs (override with env): REPOS=<dir holding the tool repos, default ../..>
 #   $REPOS/aowlparser $REPOS/aowlsem $REPOS/aowlhexer $REPOS/aowlc   (each with bin/ built,
 #   or built here with the previous root via BUILD_WITH=<existing root>)
-#   AOWL_STD=<aoughwl/std checkout, default $REPOS/std-work/std or ../std>: ROOT/lib/std is flattened from its
-#   COMMITTED content (git archive HEAD), never the working tree (CRLF-safe). STD=<flat tree> overrides.
+#   AOWL_STD=<aoughwl/std checkout, default $REPOS/std-work/std>: ROOT/lib/std is a tree of SYMLINKS into it (no copy).
 #   NIF=<aowlnif checkout> MODEL=<aowlmodel checkout>   (default $REPOS/aowlnif, $REPOS/aowlmodel)
 # Result: ROOT/bin/{aowlparser,aowlsem,aowlhexer,aowlc,aowlmony}, ROOT/lib/std, ROOT/vendor/mimalloc,
 #         ROOT/src (SRCLIB), ROOT/driver (tools/driver/*.js).
@@ -16,19 +15,20 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 ROOT="${1:-$HOME/.aowl/root}"
 REPOS="${REPOS:-$(dirname "$HERE")}"
 AOWL_STD="${AOWL_STD:-}"
-if [ -z "$AOWL_STD" ]; then for c in "$REPOS/std-work/std" "$REPOS/std" "$HOME/Desktop/dev/std-work/std"; do [ -f "$c/tools/flatten_core.sh" ] && { AOWL_STD="$c"; break; }; done; fi
-if [ -z "${STD:-}" ]; then
-  [ -n "$AOWL_STD" ] || { echo "stage: set AOWL_STD to an aoughwl/std checkout" >&2; exit 2; }
-  TMPSTD="$(mktemp -d)"; trap 'rm -rf "$TMPSTD"' EXIT
-  mkdir -p "$TMPSTD/src"; git -C "$AOWL_STD" archive HEAD | tar -x -C "$TMPSTD/src"
-  sh "$TMPSTD/src/tools/flatten_core.sh" "$TMPSTD/flat" >&2
-  STD="$TMPSTD/flat/std"
-  echo "std: $(git -C "$AOWL_STD" rev-parse --short HEAD) flattened from committed content" >&2
-fi
-if grep -rlq $'\r' "$STD" 2>/dev/null; then echo "stage: CR found in flattened std" >&2; exit 2; fi
-NIF="${NIF:-$REPOS/aowlnif}"; MODEL="${MODEL:-$REPOS/aowlmodel}"   # the aowl-owned library repos
+if [ -z "$AOWL_STD" ]; then for c in "$REPOS/std-work/std" "$REPOS/std" "$HOME/Desktop/dev/std-work/std"; do [ -f "$c/core-layout.txt" ] && { AOWL_STD="$(cd "$c" && pwd)"; break; }; done; fi
+[ -n "$AOWL_STD" ] || { echo "stage: set AOWL_STD to an aoughwl/std checkout" >&2; exit 2; }
 mkdir -p "$ROOT"/{bin,lib,vendor,src,driver}
-rm -rf "$ROOT/lib/std"; cp -r "$STD" "$ROOT/lib/std"
+# lib/std = symlinks into the aoughwl/std checkout (no copy; edits there are live). Layout from core-layout.txt.
+rm -rf "$ROOT/lib/std"; mkdir -p "$ROOT/lib/std"
+grep -v '^#' "$AOWL_STD/core-layout.txt" | while read kind name; do
+  [ -d "$AOWL_STD/$name" ] || { echo "stage: missing std folder $name" >&2; exit 3; }
+  if [ "$kind" = tree ]; then
+    (cd "$AOWL_STD/$name" && find . -type f | while read f; do
+      if [ "$name/$f" = "system/./system.nim" ]; then ln -s "$AOWL_STD/$name/$f" "$ROOT/lib/std/system.nim"
+      else mkdir -p "$ROOT/lib/std/$name/$(dirname "$f")"; ln -s "$AOWL_STD/$name/$f" "$ROOT/lib/std/$name/$f"; fi
+    done)
+  else for f in "$AOWL_STD/$name"/*; do [ -f "$f" ] && ln -s "$f" "$ROOT/lib/std/$(basename "$f")"; done; fi
+done
 MIM="$HERE/rt/vendor/mimalloc"; [ -d "$MIM" ] || MIM="${MIMALLOC:-$HOME/.aowl/root/vendor/mimalloc}"
 [ -d "$ROOT/vendor/mimalloc" ] && [ "$MIM" = "$ROOT/vendor/mimalloc" ] || cp -r "$MIM" "$ROOT/vendor/"
 for d in lib models; do cp -r "$NIF/$d" "$ROOT/src/"; done

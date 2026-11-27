@@ -140,7 +140,7 @@ function generate(opts) {
     for (const p of d.imports) m.imports.push(load(resolveImport(p, file)).file);
     const addIncludes = (fromFile, list) => {
       for (const p of list) {
-        const incCands = [path.dirname(fromFile), ...(opts.paths || [])].flatMap(d => SOURCE_EXTS.map(e => path.join(d, p + e)));
+        const incCands = [path.dirname(fromFile), ...(opts.paths || [])].flatMap(d => [...SOURCE_EXTS.map(e => path.join(d, p + e)), ...(SOURCE_EXTS.some(e => p.endsWith(e)) ? [path.join(d, p)] : [])]);   // `include "m.aowl"` names the file literally
         const inc = incCands.find(c => fs.existsSync(c));
         if (!inc) continue;                    // missing include files are ignored
         const im = { file: inc, name: nameOf(inc), isInclude: true };

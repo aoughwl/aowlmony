@@ -77,6 +77,7 @@ function ensure(file, name) {
   say(`phase 1: ${nodes1.length} sem nodes`);
   let res = await runGraph(nodes1, { jobs: 4, log: say });
   if (!res.ok) return fail("sem", res);
+  if (process.argv.includes("--sem-only")) { say("sem only: done"); return; }
 
   // ---- phase 2: lower, dce, emit, C, cc, link
   const mainDir = path.join(nc, p1.mainName);

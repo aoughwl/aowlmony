@@ -353,6 +353,7 @@ function parseArgs(argv) {
     else if (a === "--faithful") o.faithful = true;
     else if (a === "--run") o.run = true;
     else if (a === "--keep") o.keep = true;
+    else if (a === "-f" || a === "--force") o.force = true;   // full rebuild: drop the nimcache first
     else if (a === "--time") o.time = true;
     else if (a === "--no-time") o.time = false;
     else if (a === "-v" || a === "--verbose") o.verbose = true;
@@ -934,6 +935,7 @@ function compile(nimFile, o, t) {
   else if (useOurParser || useAowlsem || useAifhexer) stageNifmake(stage, t);
   else clearShim(stage, "nifmake");
   const nc = o.nimcache ? path.resolve(o.nimcache) : path.join(stage, "nc");
+  if (o.force) { try { fs.rmSync(nc, { recursive: true, force: true }); } catch (_) {} }
   if (o.nimcache) fs.mkdirSync(nc, { recursive: true });
 
   // Content-freshness guard. nifmake's needsRebuild is mtime-only: it rebuilds a
@@ -989,7 +991,8 @@ function compile(nimFile, o, t) {
   const spawnPure = () => cp.spawnSync(process.execPath, [pureDriver, abs,
       "--cwd", path.dirname(abs), "--lib", path.join(pureRoot, "lib"), "--nc", nc,
       ...((o.paths || []).length ? ["--path", o.paths.map((p) => path.resolve(p)).join(",")] : []),
-      ...((o.defines || []).length ? ["--define", o.defines.join(",")] : [])],
+      ...((o.defines || []).length ? ["--define", o.defines.join(",")] : []),
+      ...(o.semOnly ? ["--sem-only"] : [])],
     { cwd: stage, encoding: "utf8", maxBuffer: 1 << 28,
       env: Object.assign({}, process.env, {
         // an AOWL_* tool already in the environment wins (try a candidate tool without a scratch root)
@@ -1003,6 +1006,10 @@ function compile(nimFile, o, t) {
   if (r.error) log(o, (usePure ? "pure driver" : "nimony") + " could not be launched: " + r.error.message);
   const compileMs = Number(process.hrtime.bigint() - _t0) / 1e6;
   if (o.verbose && r.stderr) process.stderr.write(r.stderr);
+  if (o.semOnly) {   // `aowlmony sem`: parse + sem only; the .p/.p.deps/.s/.s.deps/.s.idx nifs stay in the nimcache
+    if (r.status !== 0) { reportCompileFailure(r, nimFile, abs, stage, o, t); fail("sem failed", COMPILE_FAIL_CODE); }
+    return { stage, nc, compileMs, semOnly: true, usePure };
+  }
 
   // main module: the nc subdir that holds <hash>.c.aif matching its own name
   let mainHash = null, cnif = null;
@@ -1947,6 +1954,7 @@ function main() {
     } else if (!file) fail("eval needs a FILE, -e CODE, or -");
   }
   if (!file) fail(cmd + " needs a .nim file");
+  if (cmd === "sem") o.semOnly = true;
   if (cmd === "verify") COMPILE_FAIL_CODE = 2;   // 1 is reserved for "they disagree"
   const absSrc = path.resolve(file);
   const b = compile(file, o, t);
@@ -1955,6 +1963,7 @@ function main() {
   // Time the run/backend step separately from compile() (already timed).
   const timeRun = (fn) => { const s = process.hrtime.bigint(); const r = fn(); return { r, ms: Number(process.hrtime.bigint() - s) / 1e6 }; };
 
+  if (b.semOnly) { console.error("  " + C.gray("sem: ") + C.cyan(b.nc)); process.exit(0); }
   switch (cmd) {
     case "artifacts":
     case "nif":  // old name, kept working silently

@@ -22,7 +22,11 @@ const extraPaths = (arg("path", "") || "").split(",").filter(Boolean).map(p => p
 const userDefines = ["aowlmony", ...(arg("define", "") || "").split(",").filter(Boolean)];   // -d: symbols for every module
 // `nimony` stays defined: aowlsem seeds it (library sources gate imports on it), and the graph must agree with the checker or a guarded import is never built.
 const IS_WIN = process.platform === "win32";
-const defines = new Set([IS_WIN ? "windows" : "linux", "nimony", ...userDefines]);
+// the symbols Nim defines for the host target: the import scan (graph.js) has to agree with aowlsem's own `defined()`
+// or an `import` inside `when defined(posix):` (std/times, os, dirs, monotimes ...) is never scanned and brings nothing in.
+const HOST_DEFINES = IS_WIN ? ["windows", "mswindows", "x86_64", "amd64", "cpu64", "littleendian"]
+  : ["linux", "posix", "unix", "x86_64", "amd64", "cpu64", "littleendian"];
+const defines = new Set([...HOST_DEFINES, "nimony", ...userDefines]);
 const T = path.resolve(arg("tools-dir", path.join(__dirname, "..", "..", "..")));
 const tools = {
   parser: process.env.AOWL_PARSER || path.join(T, "aifparser", "bin", "aowlparser.exe"),

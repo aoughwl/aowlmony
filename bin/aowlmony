@@ -937,6 +937,15 @@ function compile(nimFile, o, t) {
   const nc = o.nimcache ? path.resolve(o.nimcache) : path.join(stage, "nc");
   if (o.force) { try { fs.rmSync(nc, { recursive: true, force: true }); } catch (_) {} }
   if (o.nimcache) fs.mkdirSync(nc, { recursive: true });
+  if (o.nimcache) {
+    // A user-chosen nimcache outlives the per-key stage dir, and the build graph only compares
+    // source mtimes: a rebuilt tool (aowlsem/aowlc/...) or changed flags would silently reuse stale
+    // outputs. Stamp the toolchain key into the dir and start clean when it changes.
+    const kf = path.join(nc, ".aowlmony-key");
+    let prev = ""; try { prev = fs.readFileSync(kf, "utf8"); } catch (_) {}
+    if (prev && prev !== key) { for (const e of fs.readdirSync(nc)) { try { fs.rmSync(path.join(nc, e), { recursive: true, force: true }); } catch (_) {} } }
+    try { fs.writeFileSync(kf, key); } catch (_) {}
+  }
 
   // Content-freshness guard. nifmake's needsRebuild is mtime-only: it rebuilds a
   // node only when a source's mtime is strictly newer than the cached output. A
